@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#ffd1e8">
+<title>Mallow Pop</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <button id="btnPause" class="icon round hidden" aria-label="Pause"><svg viewBox="0 0 24 24"><rect x="6" y="5" width="4.2" height="14" rx="1.6"/><rect x="13.8" y="5" width="4.2" height="14" rx="1.6"/></svg></button>
+  <button id="btnMute" class="icon round" aria-label="Sound">
+    <svg class="on" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <svg class="off" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16 9l5 6M21 9l-5 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+  </button>
+  <div id="toast" class="hidden"></div>
+
+  <section id="menu" class="screen hidden">
+    <div class="logo"><span class="l1">Mallow</span><span class="l2">Pop</span></div>
+    <button id="btnPlay" class="btn huge play" aria-label="Play"><svg viewBox="0 0 24 24"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5z"/></svg></button>
+    <div class="row">
+      <button id="btnDaily" class="btn mid daily"><svg viewBox="0 0 24 24"><path d="M12 2l2.9 6.3 6.9.7-5.2 4.6 1.5 6.8L12 17l-6.1 3.4 1.5-6.8L2.2 9l6.9-.7z"/></svg><span>Daily</span></button>
+      <button id="btnSkins" class="btn mid skinsb"><canvas id="menuSkin" width="96" height="96"></canvas><span>Skins</span></button>
+      <button id="btnGoals" class="btn mid goalsb"><svg viewBox="0 0 24 24"><path d="M5 3h14v3a5 5 0 0 1-4 4.9V13a3 3 0 0 0 2 2.8V18H7v-2.2A3 3 0 0 0 9 13v-2.1A5 5 0 0 1 5 6V3z"/><rect x="8" y="19" width="8" height="2.4" rx="1"/></svg><span>Goals</span></button>
+    </div>
+    <div id="menuBest" class="best"></div>
+  </section>
+
+  <section id="result" class="screen hidden">
+    <div class="panel">
+      <div id="newBest" class="ribbon hidden">NEW BEST!</div>
+      <div id="resHead" class="reshead"></div>
+      <div id="resScore" class="bigscore">0</div>
+      <div id="resSub" class="ressub hidden"></div>
+      <div id="resToBest" class="tobest hidden"><div class="bar"><i id="resToBestBar"></i></div></div>
+      <div class="resRow"><span class="chip"><svg viewBox="0 0 24 24"><path d="M5 3h14v3a5 5 0 0 1-4 4.9V13a3 3 0 0 0 2 2.8V18H7v-2.2A3 3 0 0 0 9 13v-2.1A5 5 0 0 1 5 6V3z"/></svg><b id="resBest">0</b></span><span class="chip"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1.5"/><rect x="3" y="11" width="7" height="4" rx="1.5"/><rect x="14" y="11" width="7" height="4" rx="1.5"/></svg><b id="resGates">0</b></span></div>
+      <div id="nextUnlock" class="nextUnlock"><canvas id="nextCv" width="96" height="96"></canvas><div class="bar"><i id="nextBar"></i></div><b id="nextTxt"></b></div>
+      <div id="resGoal" class="goalchip hidden"></div>
+    </div>
+    <button id="btnRetry" class="btn huge retry" aria-label="Retry"><svg viewBox="0 0 24 24"><path d="M12 4a8 8 0 1 0 7.7 10.2 1.2 1.2 0 0 0-2.3-.7A5.6 5.6 0 1 1 12 6.4c1.2 0 2.3.4 3.2 1l-1.7 1.7a.8.8 0 0 0 .6 1.4H19a.8.8 0 0 0 .8-.8V4.3a.8.8 0 0 0-1.4-.6l-1.5 1.5A8 8 0 0 0 12 4z"/></svg><span>Retry</span></button>
+    <button id="btnRevive" class="btn revive hidden"><svg class="ad" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="3"/><path d="M17 10.5l5-3v9l-5-3z"/></svg><svg class="free" viewBox="0 0 24 24"><path d="M12 21s-8-5.2-8-11a4.6 4.6 0 0 1 8-3 4.6 4.6 0 0 1 8 3c0 5.8-8 11-8 11z"/></svg><span id="reviveTxt">Revive</span></button>
+    <div class="row">
+      <button id="btnResHome" class="btn small round" aria-label="Home"><svg viewBox="0 0 24 24"><path d="M12 3l9 8h-2.5v9h-5v-6h-3v6h-5v-9H3z"/></svg></button>
+      <button id="btnResSkins" class="btn small round" aria-label="Skins"><canvas id="resSkin" width="96" height="96"></canvas></button>
+    </div>
+  </section>
+
+  <section id="pause" class="screen hidden">
+    <div class="panel pausep"><div class="ptitle">Paused</div></div>
+    <button id="btnResume" class="btn huge play" aria-label="Resume"><svg viewBox="0 0 24 24"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5z"/></svg></button>
+    <button id="btnPauseHome" class="btn small round" aria-label="Home"><svg viewBox="0 0 24 24"><path d="M12 3l9 8h-2.5v9h-5v-6h-3v6h-5v-9H3z"/></svg></button>
+  </section>
+
+  <section id="skins" class="screen hidden">
+    <div class="panel wide"><div class="ptitle">Skins</div><div id="skinGrid" class="grid"></div></div>
+    <button id="btnSkinsBack" class="btn small round" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 4l-8 8 8 8" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  </section>
+
+  <section id="goals" class="screen hidden">
+    <div class="panel wide"><div class="ptitle">Daily Goals</div><div id="goalList"></div>
+      <div id="dailyBest" class="best"></div>
+      <div id="stickers" class="stickers"></div>
+    </div>
+    <button id="btnGoalsBack" class="btn small round" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 4l-8 8 8 8" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  </section>
+
+  <section id="unlock" class="screen modal hidden">
+    <div class="panel"><div class="ptitle">New friend!</div><canvas id="unlockCv" width="240" height="240"></canvas><div id="unlockName" class="uname"></div></div>
+    <button id="btnUnlockOk" class="btn mid okb" aria-label="OK"><svg viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  </section>
+</div>
+<script src="js/sdk.js"></script>
+<script src="js/save.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/skins.js"></script>
+<script src="js/gen.js"></script>
+<script src="js/render.js"></script>
+<script src="js/game.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
