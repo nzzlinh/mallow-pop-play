@@ -212,3 +212,22 @@ button { font: inherit; color: inherit; border: 0; cursor: pointer; pointer-even
 /* names wrap only between words */
 #unlock .ucard { overflow-wrap: normal; word-break: normal; font-size: calc(var(--u) * .27); padding-left: 0; padding-right: 0; letter-spacing: -.01em; }
 @media (orientation: landscape) { #unlock .ucard { font-size: calc(var(--u) * .24); } }
+
+/* v1.3 music style picker */
+.btn.pill { flex-direction: row; gap: calc(var(--u) * .25); height: calc(var(--u) * 1.1); padding: 0 calc(var(--u) * .55); border-radius: 99px; font-size: calc(var(--u) * .5); font-weight: 900;
+  background: rgba(255,255,255,.85); color: #8a4bd6; box-shadow: 0 calc(var(--u) * .08) 0 #d9c2ff; }
+.btn.pill svg { width: calc(var(--u) * .6); height: calc(var(--u) * .6); fill: currentColor; stroke: currentColor; stroke-width: 1.6; }
+.mlist { display: flex; flex-direction: column; gap: calc(var(--u) * .3); margin-top: calc(var(--u) * .4); }
+.mopt { display: flex; align-items: center; gap: calc(var(--u) * .35); text-align: left; background: #f6ecff; border: calc(var(--u) * .1) solid #e2cfff; border-radius: calc(var(--u) * .5);
+  padding: calc(var(--u) * .25) calc(var(--u) * .4); color: #6b34b8; cursor: pointer; font: inherit; }
+.mopt.sel { border-color: #ff5fa2; background: #ffe6f2; }
+.mopt .ic { flex: none; width: calc(var(--u) * 1); height: calc(var(--u) * 1); border-radius: 50%; display: grid; place-items: center; font-size: calc(var(--u) * .55); background: #fff; }
+.mopt b { display: block; font-size: calc(var(--u) * .5); color: #e0508f; }
+.mopt span { display: block; font-size: calc(var(--u) * .34); line-height: 1.2; }
+#btnMusicBack { position: absolute; left: calc(var(--u) * .5); bottom: calc(var(--u) * .5); }
+@media (orientation: landscape) {
+  .btn.pill { height: calc(var(--u) * .9); font-size: calc(var(--u) * .4); }
+  .mlist { display: grid; grid-template-columns: 1fr 1fr; gap: calc(var(--u) * .25); margin-top: calc(var(--u) * .25); }
+  .mopt b { font-size: calc(var(--u) * .42); } .mopt span { font-size: calc(var(--u) * .28); }
+  #music { padding: calc(var(--u) * .3) calc(var(--u) * 1.8); }
+}

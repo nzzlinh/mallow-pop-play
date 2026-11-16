@@ -44,6 +44,7 @@
     var d = data();
     $('menuBest').textContent = d.best > 0 ? 'Best ' + d.best : '';
     drawSkin($('menuSkin'), G.skinId(), 0.8, false);
+    $('musicName').textContent = styleOf(curStyle()).name;
   }
 
   function buildSkins() {
@@ -97,14 +98,42 @@
     st.innerHTML = html;
   }
 
+  var STYLES = [
+    { id: 'box', name: 'Music Box', desc: 'Cute bells and marimba', ic: '\u2726' },
+    { id: 'soft', name: 'Soft Chip', desc: 'Cosy retro chiptune', ic: '\u266A' },
+    { id: 'pop', name: 'Synth Pop', desc: 'Bright and punchy', ic: '\u26A1' },
+    { id: 'auto', name: 'Auto', desc: 'Changes with each zone: cute first, energetic later', ic: '\u21BB' }
+  ];
+  function styleOf(id) { for (var i = 0; i < STYLES.length; i++) if (STYLES[i].id === id) return STYLES[i]; return STYLES[0]; }
+  function curStyle() { return (G.getMusicStyle && G.getMusicStyle()) || data().musicStyle || 'box'; }
+
+  function buildMusic() {
+    var list = $('musicList'), cur = curStyle();
+    list.innerHTML = '';
+    STYLES.forEach(function (s) {
+      var b = document.createElement('button');
+      b.className = 'mopt' + (s.id === cur ? ' sel' : '');
+      b.innerHTML = '<i class="ic"></i><div><b></b><span></span></div>';
+      b.querySelector('.ic').textContent = s.ic; b.querySelector('b').textContent = s.name; b.querySelector('span').textContent = s.desc;
+      b.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (G.setMusicStyle) G.setMusicStyle(s.id); else { data().musicStyle = s.id; if (MP.save && MP.save.write) MP.save.write(data()); }
+        if (MP.audio && MP.audio.previewStyle) { try { MP.audio.previewStyle(s.id); } catch (x) { /* ignore */ } }
+        buildMusic();
+      });
+      list.appendChild(b);
+    });
+  }
+
   U.showScreen = function (name) {
-    ['menu', 'result', 'pause', 'skins', 'goals'].forEach(function (s) { show($(s), s === name); });
+    ['menu', 'result', 'pause', 'skins', 'goals', 'music'].forEach(function (s) { show($(s), s === name); });
     cur = name;
     clearTimeout(unlockTimer);
     clearTimeout(toastTimer); show($('toast'), false);
     if (name === 'menu') { back = 'menu'; menuInfo(); }
     if (name === 'skins') buildSkins();
     if (name === 'goals') buildGoals();
+    if (name === 'music') buildMusic();
     show($('unlock'), false);
   };
 
@@ -224,6 +253,8 @@
     press('btnGoals', function () { U.showScreen('goals'); });
     press('btnSkinsBack', function () { U.showScreen(back === 'result' ? 'result' : 'menu'); if (back === 'result') { $('resSkin') && drawSkin($('resSkin'), G.skinId(), 0.8, false); } });
     press('btnGoalsBack', function () { U.showScreen('menu'); });
+    press('btnMusic', function () { U.showScreen('music'); });
+    press('btnMusicBack', function () { U.showScreen('menu'); });
     press('btnRetry', function () { G.startRun({ daily: G.state.daily }); });
     press('btnRevive', function () { $('btnRevive').disabled = true; G.revive(); });
     press('btnResHome', function () { G.toMenu(); });

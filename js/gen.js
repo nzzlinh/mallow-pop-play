@@ -25,8 +25,20 @@
   var BREATH_EVERY = [[0, 10], [76, 12], [121, 15]];   // STEP: every k-th gate gets BREATH_BEATS extra
   var BREATH_BEATS = 1;
   var TAFFY_SHARE = [[11, 0.18], [25, 0.18], [45, 0.21], [75, 0.24]];   // share of phrase walls that become taffy
-  var TAFFY_MIN = [[0, 1.5], [60, 1.5], [100, 2]];                       // taffy length in beats (range 1.5..4)
+  // v1.3: a taffy sits on a long melody note (>= TAFFY_NOTE beats); its length is the note, capped by TAFFY_MAX.
+  var TAFFY_NOTE = 1.5;
   var TAFFY_MAX = [[0, 2], [40, 2.5], [80, 3], [150, 4]];
+  var TAFFY_LOOK = 2;                 // a planned taffy may move this many beats past its wanted beat to find a long note
+  var TAFFY_DEBT_MAX = 2;             // planned taffies that found no long note are made up later on long notes;
+  var TAFFY_OVER_DEBT = 1;            // from this debt on (songs with few long notes) a taffy goes on the longest
+                                      // nearby note and runs over the following notes (g.over = true, v1.2 length).
+                                      // The lesson taffy does this at once rather than wait for a long note.
+  var TAFFY_MIN = [[0, 1.5], [60, 1.5], [100, 2]];   // length range of such an "over" taffy (v1.2 table)
+  // v1.3 melody gates: each gate snaps to the lead onset nearest its wanted beat (never before the fair minimum).
+  // When the next onset is more than HOLD_SLACK beats later than wanted (sparse melody), a gate may sit on a whole
+  // beat where the melody holds a note instead (g.held = true).
+  var HOLD_SLACK = [[0, 9], [11, 1.0], [60, 0.75], [120, 0.5]];
+  var ONSET_LOOK = 64;                // steps searched for an onset (songs never rest this long)
   var LOLLI_SHARE = [[11, 0.15], [25, 0.15], [45, 0.20], [75, 0.25]];   // share of phrase holes with a lollipop
   var CLUSTER_CHANCE = [[11, 0.20], [25, 0.20], [45, 0.35], [75, 0.45], [120, 0.55], [180, 0.70]];
   var CLUSTER_LEVEL = [[0, 1], [26, 2], [46, 3], [76, 4]];             // STEP: highest cluster level allowed
@@ -117,6 +129,8 @@
   }
   function ceil2(b) { return Math.max(0.5, Math.ceil(b * 2 - 1e-6) / 2); }   // round up to the half-beat grid
   function floor2(b) { return Math.floor(b * 2 + 1e-6) / 2; }
+  function ceil4(b) { return Math.max(0.25, Math.ceil(b * 4 - 1e-6) / 4); }  // round up to the 16th grid
+  function mod(a, m) { return ((a % m) + m) % m; }
 
   function bpmFor(d) { return Math.round(curve(TEMPO, d)); }
   function spdForBpm(d, bpm) { return Math.round(bpm / 60 * curve(UNITS_PER_BEAT, d) * 100) / 100; }
@@ -140,9 +154,37 @@
 
   // The same rules on the beat grid, holding at RUSH_SPEED (so they also hold at normal speed).
   function secToBeats(sec, bpm) { return sec * C.RUSH_SPEED * bpm / 60; }
-  function minBeats(prevType, type, bpm) { return ceil2(secToBeats(minGap(prevType, type), bpm)); }
+  function minBeats(prevType, type, bpm) { return ceil4(secToBeats(minGap(prevType, type), bpm)); }
   function lolliBeatsFor(bpm) { return ceil2(secToBeats(C.PUFF_MIN + C.GRACE, bpm)); }
-  function lolliMinBeats(prevType, leadBeats, bpm) { return leadBeats + ceil2(secToBeats(lolliExtra(prevType), bpm)); }
+  function lolliMinBeats(prevType, leadBeats, bpm) { return leadBeats + ceil4(secToBeats(lolliExtra(prevType), bpm)); }
+
+  // ---- melody (songs.js) ----
+  // A song starts at absolute beat `start` (multiple of 4) and loops; song step of absolute step S = (S - 4 start) mod steps.
+  var FALLBACK = (function () {   // only used when songs.js is missing: an onset every half beat
+    var lead = [], dur = [];
+    for (var i = 0; i < 16; i++) { lead.push(i % 2 ? 0 : 72); dur.push(i % 2 ? 0 : 2); }
+    return { id: '', zone: 0, steps: 16, lead: lead, leadDur: dur };
+  })();
+  function songById(id) {
+    var S = MP.songs;
+    return (S && S.get && id ? S.get(id) : null) || (id ? null : FALLBACK);
+  }
+  // { note, beats } when absolute step S is a lead onset of the song started at `start`, else null
+  function onsetIn(song, start, S) {
+    var k = mod(S - start * 4, song.steps);
+    return song.lead[k] ? { note: song.lead[k], beats: song.leadDur[k] / 4 } : null;
+  }
+  // the lead note sounding at S (onset or held): { note, beats (remaining), onset (bool) } or null (rest)
+  function soundingIn(song, start, S) {
+    var k = mod(S - start * 4, song.steps);
+    for (var j = 0; j < song.steps; j++) {
+      var i = mod(k - j, song.steps);
+      if (song.lead[i]) return song.leadDur[i] > j ? { note: song.lead[i], beats: (song.leadDur[i] - j) / 4, onset: j === 0 } : null;
+    }
+    return null;
+  }
+  function leadAt(songId, songStart, S) { var s = songById(songId); return s ? onsetIn(s, songStart, S) : null; }
+  function noteAt(songId, songStart, S) { var s = songById(songId); return s ? soundingIn(s, songStart, S) : null; }
 
   // How far (units) a hole may sit from the anchor, given what comes right before it. Seconds are at normal speed;
   // the budget is computed at RUSH_SPEED for a player who presses 0.05 s before a wall, may hold it until GRACE
@@ -181,12 +223,13 @@
 
   function create(seed, opts) {
     opts = opts || {};
-    var rng = mulberry32(hashSeed(seed));
+    var rng = mulberry32(hashSeed(seed)), songRng = mulberry32(hashSeed(seed + ':songs'));
     var offset = (opts.offset | 0) + (opts.tutorial ? 0 : 10);
     var script = opts.tutorial ? TUTORIAL : WARMIN;
     var n = 0, queue = [], prev = null, lastCls = '', lastRun = 0, lastT = false;
     var curSeg = -1, bpm = 0, spd = 0, endBeat = 0, anchor = 0;
     var lessonQueued = !opts.slideLesson, lessonDone = !opts.slideLesson;
+    var song = null, songStart = 0, taffyDebt = 0;
 
     function cls(c) { return c === 'H' ? 'H' : 'W'; }
 
@@ -211,7 +254,7 @@
       if (!lessonQueued && d > LAT_FROM && validSeq('WH', letter)) {
         lessonQueued = true;
         track('W'); track('H'); lastT = false;
-        queue.push({ c: 'W', beats: SLIDE_LESSON.wallBeats }, { c: 'H', slide: 1 });
+        queue.push({ c: 'W', beats: SLIDE_LESSON.wallBeats, lesson: 1 }, { c: 'H', slide: 1 });
         return;
       }
       if (rng() < curve(CLUSTER_CHANCE, d)) {
@@ -240,13 +283,51 @@
       for (i = 0; i < ph.length; i++) {
         var c = ph[i], el = { c: c };
         track(c);
-        if (c === 'W' && !lastT && rng() < ts) {
-          el.c = 'T';
-          el.len = clamp(Math.round(lerp(curve(TAFFY_MIN, d), curve(TAFFY_MAX, d), rng()) * 2) / 2, 1.5, 4);
-        } else if (c === 'H' && rng() < lo) el.lolli = 1;
+        if (c === 'W' && !lastT && rng() < ts) el.c = 'T';   // length comes from the melody note
+        else if (c === 'H' && rng() < lo) el.lolli = 1;
         lastT = el.c === 'T';
         queue.push(el);
       }
+    }
+
+    // Earliest fair start (absolute beat) of a gate of class c after the previous gate.
+    function earliest(c, lolliBeats) {
+      var type = TYPE[c];
+      if (!prev) return endBeat + (lolliBeats ? lolliBeats + 0.5 : 0.25);
+      var e = endBeat + minBeats(prev.type, type, bpm);
+      if (lolliBeats) e = Math.max(e, endBeat + lolliMinBeats(prev.type, lolliBeats, bpm));
+      return e;
+    }
+    function isLong(S) { var o = onsetIn(song, songStart, S); return !!o && o.beats >= TAFFY_NOTE - EPS; }
+    // Lead onset (absolute step) at or after beat e nearest to the wanted beat D (ties: earlier); -1 if none
+    // up to beat `last` (default: ONSET_LOOK steps). longOnly: notes of at least TAFFY_NOTE beats.
+    function findOnset(e, D, last, longOnly) {
+      var s0 = Math.ceil(e * 4 - 1e-6), s1 = last != null ? Math.floor(last * 4 + 1e-6) : s0 + ONSET_LOOK, best = -1, bc = 1e9;
+      for (var S = s0; S <= s1; S++) {
+        var c = Math.abs(S / 4 - D);
+        if (S / 4 > D && c >= bc) break;
+        if (!onsetIn(song, songStart, S) || (longOnly && !isLong(S))) continue;
+        if (c < bc - EPS) { bc = c; best = S; }
+      }
+      return best;
+    }
+    // Onset in [e, last] with the longest note (ties: nearest to D); -1 if none.
+    function findLongest(e, D, last) {
+      var best = -1, bd = -1, bc = 1e9;
+      for (var S = Math.ceil(e * 4 - 1e-6); S <= Math.floor(last * 4 + 1e-6); S++) {
+        var o = onsetIn(song, songStart, S), c = Math.abs(S / 4 - D);
+        if (o && (o.beats > bd + EPS || (Math.abs(o.beats - bd) <= EPS && c < bc - EPS))) { bd = o.beats; bc = c; best = S; }
+      }
+      return best;
+    }
+    // Sparse melody: a whole beat in [e, before onset S1) where a note is held, nearest to D; -1 if none.
+    function findHeld(e, D, S1) {
+      var best = -1, bc = 1e9;
+      for (var S = Math.ceil(e - 1e-6) * 4; S < S1; S += 4) {
+        var h = soundingIn(song, songStart, S), c = Math.abs(S / 4 - D);
+        if (h && !h.onset && c < bc - EPS) { bc = c; best = S; }
+      }
+      return best;
     }
 
     function makePath(d, L, a) {
@@ -270,41 +351,82 @@
 
     function next() {
       n++;
-      var d = n + offset, seg = Math.floor((n - 1) / SEG_GATES), el, beats, scripted = n <= script.length;
+      var d = n + offset, seg = Math.floor((n - 1) / SEG_GATES), el, want, scripted = n <= script.length;
+      var segStart = seg !== curSeg && n > 1;
       if (seg !== curSeg) {
         curSeg = seg;
         var d0 = seg * SEG_GATES + 1 + offset;
         bpm = bpmFor(d0); spd = spdForBpm(d0, bpm);
       }
+      if (!song) {
+        // segment 0: the song starts with the run (beat 0), or continues a given song (menu demo)
+        if (opts.song && songById(opts.song.id) && opts.song.id) { song = songById(opts.song.id); songStart = opts.song.start | 0; }
+        else { song = MP.songs && MP.songs.pick ? MP.songs.pick(0, songRng) : FALLBACK; songStart = 0; }
+        if (!song || !song.steps) song = FALLBACK;
+      }
       if (scripted) {
         el = script[n - 1];
         track(el.c);
         lastT = el.c === 'T';
-        beats = el.beats;
+        want = el.beats;
       } else {
         if (!queue.length) pushPhrase(d);
         el = queue.shift();
-        if (el.slide) beats = ceil2(SLIDE_LESSON.holeSec * bpm / 60);
-        else if (el.beats != null) beats = el.beats;
+        if (el.beats != null) want = el.beats;
         else {
           var base = gapBeatsFor(d), f = floor2(base);
-          beats = f + (rng() < (base - f) * 2 ? 0.5 : 0);
-          if (n % stepv(BREATH_EVERY, d) === 0) beats += BREATH_BEATS;
-          else if (rng() < GAP_JITTER) beats += 0.5;
+          want = f + (rng() < (base - f) * 2 ? 0.5 : 0);
+          if (n % stepv(BREATH_EVERY, d) === 0) want += BREATH_BEATS;
+          else if (rng() < GAP_JITTER) want += 0.5;
         }
       }
-      var type = TYPE[el.c];
-      var lenBeats = type === 'taffy' ? (el.len || 1.5) : 0;
-      var lolliBeats = el.lolli && type === 'hole' ? lolliBeatsFor(bpm) : 0;
-      if (prev) {
-        beats = Math.max(beats, minBeats(prev.type, type, bpm));
-        if (lolliBeats) beats = Math.max(beats, lolliMinBeats(prev.type, lolliBeats, bpm));
-      } else if (lolliBeats) beats = Math.max(beats, lolliBeats + 0.5);
-      if (seg > 0 && n === seg * SEG_GATES + 1) {
-        beats = Math.max(beats, SEG_BREATH);
-        while ((endBeat + beats) % 4 !== 0) beats += 0.5;
+      var c = el.c;
+      if (c === 'T' && prev && prev.type === 'taffy') { c = 'W'; taffyDebt = Math.min(TAFFY_DEBT_MAX, taffyDebt + 1); }
+      var lolliBeats = el.lolli && c === 'H' ? lolliBeatsFor(bpm) : 0;
+      var floorB = el.slide ? ceil4(SLIDE_LESSON.holeSec * bpm / 60) : scripted ? el.beats : 0;   // lesson gaps never shrink
+      function lower(cc) { return Math.max(earliest(cc, lolliBeats), endBeat + floorB); }
+      var e = lower(c), D = Math.max(e, endBeat + want), S = -1, held = false, over = false;
+
+      if (segStart) {
+        // a new segment starts its song on the bar line of its first gate (song step 0 is always an onset)
+        var bar = Math.ceil(Math.max(e, endBeat + SEG_BREATH) / 4 - 1e-9) * 4;
+        song = MP.songs && MP.songs.pick ? MP.songs.pick(seg, songRng, song.id) : song;
+        if (!song || !song.steps) song = FALLBACK;
+        songStart = bar; S = bar * 4;
+        if (!onsetIn(song, songStart, S)) S = findOnset(bar, bar);   // defensive: data without a downbeat note
+        if (c === 'T' && !isLong(S)) { c = 'W'; taffyDebt = Math.min(TAFFY_DEBT_MAX, taffyDebt + 1); }
+      } else {
+        if (c === 'T') {
+          S = findOnset(e, D, D + TAFFY_LOOK, true);
+          if (S < 0 && (scripted || taffyDebt >= TAFFY_OVER_DEBT)) { S = findLongest(e, D, Math.max(D + TAFFY_LOOK, e + 4)); over = S >= 0; }
+          if (S < 0) { c = 'W'; taffyDebt = Math.min(TAFFY_DEBT_MAX, taffyDebt + 1); e = lower(c); D = Math.max(e, endBeat + want); }
+        }
+        if (c !== 'T') {
+          S = findOnset(e, D);
+          if (!scripted && S / 4 > D + curve(HOLD_SLACK, d) + EPS) {
+            var Sh = findHeld(e, D, S);
+            if (Sh >= 0) { S = Sh; held = true; }
+          }
+          // a wall on a long note pays back a taffy that found no long note earlier
+          if (c === 'W' && !held && !scripted && !el.lesson && taffyDebt > 0 && isLong(S) && !(prev && prev.type === 'taffy') &&
+              !(queue.length && queue[0].c === 'T') && S / 4 >= lower('T') - EPS) {
+            c = 'T'; taffyDebt--;
+            if (!queue.length) lastT = true;
+          }
+        }
       }
-      var beat = endBeat + beats, spb = 60 / bpm;
+      var type = TYPE[c], beat = S / 4, beats = beat - endBeat, spb = 60 / bpm;
+      if (S < 0) { S = Math.ceil(D * 4 - 1e-6); held = true; }   // defensive only: songs never rest that long
+      var nt = (held ? soundingIn(song, songStart, S) : onsetIn(song, songStart, S)) || { note: 0, beats: 0 };
+      var lenBeats = 0;
+      if (type === 'taffy') {
+        var cap = el.len && el.c === 'T' ? el.len : curve(TAFFY_MAX, d);
+        if (over) {
+          lenBeats = el.len || clamp(Math.round(lerp(curve(TAFFY_MIN, d), curve(TAFFY_MAX, d), rng()) * 2) / 2, 1.5, 4);
+          if (lenBeats <= nt.beats + EPS) over = false;   // the note covers the hold after all
+        } else lenBeats = Math.max(1.5, Math.min(4, cap, nt.beats));
+        lenBeats = Math.floor(lenBeats * 4 + 1e-6) / 4;
+      }
       endBeat = beat + lenBeats;
 
       // lateral
@@ -337,7 +459,8 @@
         beats: beats, beat: beat, gapBefore: beats * spb,
         lenBeats: lenBeats, len: lenBeats * spb,
         lolli: lolliBeats * spb, lolliBeats: lolliBeats,
-        x: x, path: path, tut: !!tutKind, tutKind: tutKind
+        x: x, path: path, tut: !!tutKind, tutKind: tutKind,
+        songId: song.id, songStart: songStart, step: S, note: nt.note, noteBeats: nt.beats, held: held, over: over
       };
       prev = g;
       return g;
@@ -440,6 +563,7 @@
   }
 
   function isHalf(v) { return typeof v === 'number' && Math.abs(v * 2 - Math.round(v * 2)) < 1e-9; }
+  function isQuarter(v) { return typeof v === 'number' && Math.abs(v * 4 - Math.round(v * 4)) < 1e-9; }
   function near(a, b) { return Math.abs(a - b) < 1e-6; }
 
   // Static rule check of one generated run (gates in order). opts as given to create(). Counts into bad[rule].
@@ -448,10 +572,11 @@
     function hit(rule) { bad[rule] = (bad[rule] || 0) + 1; nb++; }
     var scriptLen = opts.tutorial ? TUTORIAL.length : WARMIN.length;
     var prev = null, run = 0, runCls = '', endBeat = 0, anchor = 0, slideSeen = false, i, k;
+    var start0 = opts.song && opts.song.id ? opts.song.start | 0 : 0;
     for (i = 0; i < gates.length; i++) {
       var a = gates[i], c = a.type === 'hole' ? 'H' : 'W', spb = 60 / a.bpm;
-      // grid and bookkeeping
-      if (!isHalf(a.beats) || !isHalf(a.beat) || !isHalf(a.lenBeats) || !isHalf(a.lolliBeats)) hit('grid');
+      // grid and bookkeeping (v1.3: gates sit on 16th steps of the melody)
+      if (!isQuarter(a.beats) || !isQuarter(a.beat) || !isQuarter(a.lenBeats) || !isHalf(a.lolliBeats)) hit('grid');
       if (a.beats <= 0) hit('grid');
       if (a.beat !== endBeat + a.beats) hit('beat');
       if (!near(a.gapBefore, a.beats * spb) || !near(a.len, a.lenBeats * spb) || !near(a.lolli, a.lolliBeats * spb)) hit('secs');
@@ -460,6 +585,21 @@
       if (!(a.spd >= 6 && a.spd <= 15)) hit('speed');
       if (prev && prev.seg === a.seg && (prev.bpm !== a.bpm || prev.spd !== a.spd)) hit('segConst');
       if (prev && prev.seg !== a.seg && (a.beats < SEG_BREATH || a.beat % 4 !== 0)) hit('segStart');
+      // melody: the gate is a lead onset of its segment's song (or, flagged held, a whole beat inside a held note)
+      var song = songById(a.songId);
+      if (!song || a.songStart % 4 !== 0 || a.step !== Math.round(a.beat * 4) || a.step < a.songStart * 4) hit('song');
+      else {
+        if (prev && prev.seg === a.seg && (prev.songId !== a.songId || prev.songStart !== a.songStart)) hit('songSeg');
+        if (prev && prev.seg !== a.seg && a.songStart !== a.beat) hit('songStart');
+        if (!prev && a.songStart !== start0) hit('songStart');
+        if (MP.songs && MP.songs.zoneForSeg && (prev ? prev.seg !== a.seg : !opts.song) &&
+            song.zone !== MP.songs.zoneForSeg(a.seg)) hit('songZone');
+        var on = a.held ? soundingIn(song, a.songStart, a.step) : onsetIn(song, a.songStart, a.step);
+        if (!on || (a.held && (on.onset || a.step % 4 !== 0 || a.type === 'taffy'))) hit('onset');
+        else if (on.note !== a.note || Math.abs(on.beats - a.noteBeats) > 1e-9) hit('note');
+        if (a.type === 'taffy' && !a.over && (a.noteBeats < TAFFY_NOTE - 1e-9 || a.lenBeats > a.noteBeats + 1e-9)) hit('taffyNote');
+        if (a.over && (a.type !== 'taffy' || a.lenBeats <= a.noteBeats + 1e-9)) hit('taffyNote');
+      }
       endBeat = a.beat + a.lenBeats;
       // seconds rules at normal speed and at RUSH_SPEED
       for (var kk = 0; kk < 2; kk++) {
@@ -497,8 +637,13 @@
           if (p.length && a.x !== p[p.length - 1].x) hit('pathExit');
         } else if (a.x !== anchor) hit('pathExit');
       }
-      // soft gates
+      // soft gates; the scripted lesson keeps at least its scripted gaps and kinds
       if (a.tut !== !!a.tutKind) hit('tut');
+      if (a.n <= scriptLen) {
+        var sc = (opts.tutorial ? TUTORIAL : WARMIN)[a.n - 1];
+        if (a.beats < sc.beats - 1e-9 || TYPE[sc.c] !== a.type || (sc.tut && opts.tutorial && a.tutKind !== sc.tut) ||
+            (sc.lolli && !a.lolli)) hit('script');
+      }
       if (a.tutKind === 'slide') {
         if (!opts.slideLesson || slideSeen || !prev || prev.type !== 'wall' || a.type !== 'hole' || a.x === 0 ||
             a.gapBefore < 0.85) hit('slideLesson');
@@ -512,7 +657,7 @@
     return nb;
   }
 
-  // Checks every rule of the v1.2 contract over `seeds` seeds of `count` gates (tutorial / offsets / slideLesson
+  // Checks every rule of the v1.2 + v1.3 contract over `seeds` seeds of `count` gates (tutorial / offsets / slideLesson
   // mixed). Returns { ok, violations, rules: { rule: count }, runs, gates }.
   function selfTest(seeds, count, only) {
     var bad = {}, violations = 0, s, i;
@@ -533,8 +678,10 @@
   }
 
   MP.gen = {
-    VERSION: 12,
+    VERSION: 13,
     create: create,
+    leadAt: leadAt,
+    noteAt: noteAt,
     selfTest: selfTest,
     checkRun: checkRun,
     feasible: feasible,
@@ -544,12 +691,14 @@
     baseGap: baseGap,
     minGap: minGap,
     reachFor: reachFor,
+    minBeats: minBeats,
     rng: function (seed) { return mulberry32(hashSeed(seed)); },
     phrases: PHRASES,
     SEG_GATES: SEG_GATES,
     tables: {
       TEMPO: TEMPO, UNITS_PER_BEAT: UNITS_PER_BEAT, GAP_BEATS: GAP_BEATS, BREATH_EVERY: BREATH_EVERY,
-      TAFFY_SHARE: TAFFY_SHARE, TAFFY_MIN: TAFFY_MIN, TAFFY_MAX: TAFFY_MAX, LOLLI_SHARE: LOLLI_SHARE,
+      TAFFY_SHARE: TAFFY_SHARE, TAFFY_NOTE: TAFFY_NOTE, TAFFY_MIN: TAFFY_MIN, TAFFY_MAX: TAFFY_MAX, TAFFY_LOOK: TAFFY_LOOK, HOLD_SLACK: HOLD_SLACK,
+      LOLLI_SHARE: LOLLI_SHARE,
       CLUSTER_CHANCE: CLUSTER_CHANCE, CLUSTER_LEVEL: CLUSTER_LEVEL, AMP: AMP, SHIFT_CHANCE: SHIFT_CHANCE,
       SHIFT_MAX: SHIFT_MAX, ZIG_CHANCE: ZIG_CHANCE, ZIG_AMP: ZIG_AMP, ZIG_TURNS: ZIG_TURNS
     }

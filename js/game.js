@@ -18,6 +18,10 @@
   var G = MP.game = {};
   var st = G.state = { mode: 'menu', score: 0, gates: 0, combo: 0, mult: 1, alive: true, running: false, paused: false, daily: false };
   var W = null, data = null, acc = 0, lastFrameMs = 0, runsDone = 0, busy = false, musicOn = false, tipSeen = {}, steerDir = 0;
+  // v1.3 music: the player performs the melody (gate notes), the backing plays the rest. Menu music (the demo
+  // performing) only starts after a user gesture this session, because audio may be locked before that.
+  var STYLES = ['box', 'soft', 'pop', 'auto'], MUSIC_CALLS = { queueSong: 1, ownStep: 1, hitNote: 1, tickNote: 1, lolliNote: 1 };
+  var gesture = false, menuMusicOk = true, menuOn = false;
 
   function sdk(name) {
     var s = MP.sdk;
@@ -26,11 +30,16 @@
     }
     return undefined;
   }
-  function aud(name, a, b) {
-    if (W && W.demo) return;
+  // Sound calls: never throw. The menu demo is silent except for its music while menu music is on.
+  function audAny(name) {
     var s = MP.audio;
-    if (s && typeof s[name] === 'function') { try { s[name](a, b); } catch (e) { /* ignore */ } }
+    if (s && typeof s[name] === 'function') { try { s[name].apply(s, Array.prototype.slice.call(arguments, 1)); } catch (e) { /* ignore */ } }
   }
+  function aud(name) {
+    if (W && W.demo && !(menuOn && MUSIC_CALLS[name])) return;
+    audAny.apply(null, arguments);
+  }
+  function hasAud(name) { return !!(MP.audio && typeof MP.audio[name] === 'function'); }
   function ui(name, a, b) {
     if (MP.ui && typeof MP.ui[name] === 'function') return MP.ui[name](a, b);
     return undefined;
@@ -48,41 +57,45 @@
   function bgAt(i) { return BG[i % BG.length]; }
   function clampLat(x) { return x < -LAT ? -LAT : x > LAT ? LAT : x; }
   function isV12() { return !!(MP.gen && MP.gen.VERSION >= 12); }
-  function seedRng(seed) {
-    if (MP.gen && typeof MP.gen.rng === 'function') { try { return MP.gen.rng(seed); } catch (e) { /* fall through */ } }
-    var a = 0, i;
-    seed = String(seed);
-    for (i = 0; i < seed.length; i++) a = (Math.imul(a, 31) + seed.charCodeAt(i)) | 0;
-    return function () {
-      a = (a + 0x6D2B79F5) | 0;
-      var t = Math.imul(a ^ (a >>> 15), 1 | a);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-  // The song of a segment comes from the run seed, so a Daily Run plays the same songs for everyone.
-  function pickSong(seg) {
-    var S = MP.songs, s = null;
-    if (S && typeof S.pick === 'function') { try { s = S.pick(seg, W.songRng, W.songId || undefined); } catch (e) { s = null; } }
-    return s && s.id != null ? s.id : '';
-  }
   // The menu demo plays a little further into the difficulty curve so it shows sliding and taffy paths.
-  function demoOpts() { return { offset: isV12() ? DEMO_OFFSET : 0, tutorial: false, slideLesson: false }; }
+  // `song` = { id, start } keeps the demo's song going across its short generator loops (start relative to the loop).
+  function demoOpts(song) { return { offset: isV12() ? DEMO_OFFSET : 0, tutorial: false, slideLesson: false, song: song || null }; }
+  function styleOk(id) { return STYLES.indexOf(id) >= 0; }
 
   G.dateKey = dateKey;
   G.getData = function () { return data; };
   G.getWorld = function () { return W; };
   G.skinId = function () { return (data && data.skin) || 'mallow'; };
   G.isDemo = function () { return !W || W.demo; };
+  // Music style: 'box' | 'soft' | 'pop' | 'auto' (saved; audio resolves 'auto' from the zone).
+  G.getMusicStyle = function () { return data && styleOk(data.musicStyle) ? data.musicStyle : 'box'; };
+  G.setMusicStyle = function (id) {
+    if (!styleOk(id)) return false;
+    gesture = true;
+    if (data) { data.musicStyle = id; persist(); }
+    audAny('setStyle', id);
+    return true;
+  };
+  // Menu music (the demo performs its song). Called from a user gesture with true: allowed and started now if the
+  // menu is showing; false stops it (e.g. while a style preview plays). Default: allowed, starts on the first return
+  // to the menu after a run.
+  G.menuMusic = function (on) {
+    menuMusicOk = !!on;
+    if (on) { gesture = true; startMenuMusic(); } else stopMenuMusic();
+  };
+  G.menuMusicOn = function () { return menuOn; };
 
   G.init = function () {
     try { data = MP.save.load(); } catch (e) { data = null; }
-    if (!data) data = { v: 1, best: 0, totalGates: 0, skin: 'mallow', unlocked: ['mallow'], dailySeed: '', dailyBest: 0, goals: { date: '', list: [] }, stickers: 0, mute: false, runs: 0 };
+    if (!data) data = { v: 1, best: 0, totalGates: 0, skin: 'mallow', unlocked: ['mallow'], dailySeed: '', dailyBest: 0, goals: { date: '', list: [] }, stickers: 0, mute: false, runs: 0, musicStyle: 'box' };
     if (!data.unlocked) data.unlocked = ['mallow'];
     if (data.dailySeed !== dateKey()) { data.dailySeed = dateKey(); data.dailyBest = 0; data.dailyBestGates = 0; }
     if (!data.feats) data.feats = {};
     if (!data.recent) data.recent = [];
     data.slideOk = !!data.slideOk;
+    if (!styleOk(data.musicStyle)) data.musicStyle = 'box';
+    audAny('setStyle', data.musicStyle);
+    audAny('setZone', 0);
     try {
       var cur = MP.skins && MP.skins.get && MP.skins.get(data.skin);
       if (cur && MP.audio && MP.audio.setPopNote) MP.audio.setPopNote(cur.popNote);
@@ -100,7 +113,7 @@
     W = {
       demo: !!o.demo, daily: !!o.daily, seed: seed, tutorial: !!o.tutorial, offset: gopts.offset, slideLesson: !!gopts.slideLesson,
       gen: MP.gen.create(seed, gopts), gates: [], ni: 0, genN: 0, lastP: 0, lastBeat: 0, beatOff: 0,
-      lx: 0, lxGo: null, sdv: 0, steer: 0, bpm: 120, beatF: 0, seg: 0, songId: '', songRng: seedRng(seed + ':songs'),
+      lx: 0, lxGo: null, sdv: 0, steer: 0, bpm: 120, beatF: 0, seg: 0, songId: '', qSongId: null, qSongStart: 0, demoLoops: 0,
       tickN: 0, tickT: 9, holdK: 0, scrape: 0, ghostX: 0, slid: 0,
       pos: 0, speed: 7, vel: 7, simT: 0, runT: 0, puffT: 0, own: false, held: false, cd: 0, pend: -1, lastTap: -9, puffEnd: -9, evs: [], invT: 0,
       pop: 1, popV: 0, phase: 0, hitT: 0, dOff: 0, deadT: 0, rot: 0, shake: 0, shakeAmp: 6, hitStop: 0,
@@ -114,8 +127,7 @@
     };
     acc = 0;
     fill();
-    if (W.gates[0]) { W.bpm = W.gates[0].bpm; W.seg = W.gates[0].seg; }
-    W.songId = pickSong(W.seg);
+    if (W.gates[0]) { W.bpm = W.gates[0].bpm; W.seg = W.gates[0].seg; W.songId = W.gates[0].songId; }
     return W;
   }
 
@@ -123,9 +135,12 @@
     var w = W, limit = w.pos + 26;
     while (w.lastP < limit) {
       if (w.demo && w.genN >= 16) {
-        // the demo loops short stretches; the next one starts on a bar line so the beat clock stays continuous
-        w.gen = MP.gen.create(String(Math.random()), demoOpts()); w.genN = 0;
-        w.beatOff = Math.ceil(w.lastBeat / 4 - 1e-6) * 4;
+        // the demo loops short stretches; the next one starts on a bar line so the beat clock stays continuous,
+        // and keeps the song going (a new song every third loop)
+        var nb = Math.ceil(w.lastBeat / 4 - 1e-6) * 4;
+        w.demoLoops++;
+        w.gen = MP.gen.create(String(Math.random()), demoOpts(w.demoLoops % 3 && w.qSongId ? { id: w.qSongId, start: w.qSongStart - nb } : null));
+        w.genN = 0; w.beatOff = nb;
       }
       var nx = w.gen.next();
       w.genN++;
@@ -141,7 +156,14 @@
         path = [];
         for (i = 0; i < nx.path.length; i++) path.push({ p: p + nx.path[i].b * upb, x: clampLat(+nx.path[i].x || 0) });
       }
+      // melody: the gate owns its lead note; the first gate of a song queues the song at its start beat
+      var songId = nx.songId != null ? nx.songId : '', songStart = (nx.songStart || 0) + w.beatOff;
+      var stepAbs = nx.step != null ? nx.step + w.beatOff * 4 : Math.round(beat * 4);
+      if (songId !== w.qSongId || songStart !== w.qSongStart) { w.qSongId = songId; w.qSongStart = songStart; aud('queueSong', songId, songStart); }
+      aud('ownStep', stepAbs);
       w.gates.push({
+        songId: songId, songStart: songStart, step: stepAbs, note: nx.note || 0, noteBeats: nx.noteBeats || 0, held: !!nx.held,
+        lb: nx.lolliBeats != null ? nx.lolliBeats : lolli * bpm / 60,
         n: nx.n, type: nx.type, p: p, pe: pe, lp: p - lolliU, lolli: lolli, len: nx.len || 0, lenBeats: lenB, tut: !!nx.tut,
         tutKind: nx.tut ? (nx.tutKind || (nx.type === 'hole' ? (lolli ? 'lolli' : 'hole') : nx.type)) : '',
         x: clampLat(+nx.x || 0), beat: beat, bpm: bpm, seg: nx.seg != null ? nx.seg : Math.floor((nx.n - 1) / SEG_GATES),
@@ -181,11 +203,42 @@
   }
   function leaveTaffy() { W.tickN = 0; W.tickT = 9; }
 
+  // Re-send the song queue and owned steps of every gate still in the world (after the music (re)starts, so the
+  // audio engine has them even if it reset its state while stopped).
+  function resendMusic() {
+    var w = W, i, g, id = null, start = 0;
+    if (!w) return;
+    for (i = 0; i < w.gates.length; i++) {
+      g = w.gates[i];
+      if (g.songId !== id || g.songStart !== start) { id = g.songId; start = g.songStart; aud('queueSong', id, start); }
+      aud('ownStep', g.step);
+    }
+  }
+  function startMenuMusic() {
+    if (menuOn || !menuMusicOk || !gesture || st.mode !== 'menu' || !W || !W.demo) return;
+    menuOn = true;
+    audAny('setZone', 0);
+    audAny('startMusic');
+    resendMusic();
+  }
+  function stopMenuMusic() {
+    if (!menuOn) return;
+    menuOn = false;
+    audAny('stopMusic');
+  }
+  // the musical note of a cleared gate (falls back to the v1.2 pip when the audio engine has no notes)
+  function gateNote(g, kind) {
+    if (hasAud('hitNote')) aud('hitNote', g.step, g.note, g.noteBeats, kind);
+    else if (kind === 'hole') aud('pip');
+  }
+
   // ---- run lifecycle ----
   G.startRun = function (opts) {
     opts = opts || {};
     if (busy) return Promise.resolve();
     busy = true;
+    gesture = true;
+    stopMenuMusic();
     // No ad break after a revive or when a Revive was on offer: one ad decision per break.
     var skip = W && !W.demo && (W.revived || (W.result && W.result.reviveKind));
     var p = runsDone >= 1 && !skip ? Promise.resolve(sdk('commercialBreak')).catch(function () {}) : Promise.resolve();
@@ -208,7 +261,7 @@
     newWorld({ daily: daily, seed: seed, tutorial: tut, offset: tut ? 0 : startOffset(daily), slideLesson: !daily && !data.slideOk });
     st.mode = 'run'; st.score = 0; st.gates = 0; st.combo = 0; st.mult = 1; st.alive = true;
     st.running = false; st.paused = false; st.daily = daily;
-    aud('setSong', W.songId); aud('setLayer', 0); aud('setRush', false);
+    aud('setZone', 0); aud('setLayer', 0); aud('setRush', false);
     ui('showScreen', null);
     ui('setPlaying', true);
   }
@@ -217,8 +270,11 @@
     if (st.mode === 'run' && W && !W.demo && st.gates > 0) { finishRun(); }
     sdk('gameplayStop');
     if (musicOn) { musicOn = false; aud('stopMusic'); }
+    stopMenuMusic();
     newWorld({ demo: true });
     st.mode = 'menu'; st.running = false; st.paused = false; st.alive = true; st.score = 0; st.gates = 0; st.combo = 0; st.mult = 1;
+    audAny('setZone', 0);
+    startMenuMusic();
     ui('setPlaying', false);
     ui('showScreen', 'menu');
   };
@@ -295,10 +351,11 @@
     if (!W) return;
     if (st.mode !== 'run' || st.paused || W.dead) return;
     var at = W.simT;
+    gesture = true;
     if (!st.running) {
       st.running = true;
       sdk('gameplayStart');
-      if (!musicOn) { musicOn = true; aud('startMusic'); }
+      if (!musicOn) { musicOn = true; aud('startMusic'); resendMusic(); }
     } else at = evTime(evMs);
     W.evs.push({ t: at, d: 1 });
   };
@@ -468,9 +525,9 @@
         if (de <= win) { clearTaffy(g, de); w.ni++; continue; }
         if (!puffed) { fail(g, 'taffy'); if (w.dead) return; w.ni++; continue; }
         if (g.path && !followPath(g)) { fail(g, 'path'); if (w.dead) return; w.ni++; continue; }
-        // hold ticks on the half-beat grid, counted from the start of the taffy
-        var ti = Math.floor((w.beatF - g.beat) / TICK_BEATS + 1e-6);
-        if (ti > g.tk) { g.tk = ti; holdTick(); }
+        // hold ticks on the absolute half-beat grid, counted from the start of the taffy
+        var t0 = Math.floor(g.beat / TICK_BEATS + 1e-6), ti = Math.floor(w.beatF / TICK_BEATS + 1e-6) - t0;
+        if (ti > g.tk) { g.tk = ti; holdTick((t0 + ti) * TICK_BEATS); }
         break;
       } else {
         if (dist > win) break;
@@ -504,12 +561,12 @@
     return true;
   }
 
-  function holdTick() {
+  function holdTick(absBeat) {
     var w = W;
     w.tickN++; w.tickT = 0;
     w.holdK = Math.min(1, w.tickN / 6);
     if (!w.demo) { st.score += pts(1, true); w.scoreAnim = 0.12; }
-    aud('holdTick', w.tickN);
+    if (hasAud('tickNote')) aud('tickNote', absBeat, w.tickN); else aud('holdTick', w.tickN);
     if (MP.headless) return;
     if (!w.demo) { w.shake = 0.07; w.shakeAmp = 2 + 3 * w.holdK; }
     sparks(5 + Math.round(5 * w.holdK), null);
@@ -531,16 +588,16 @@
   function enterSeg(seg) {
     var w = W;
     w.seg = seg;
-    w.songId = pickSong(seg);
+    var ng = w.gates[w.ni];
+    if (ng && ng.seg === seg) w.songId = ng.songId;   // the song itself was queued when this gate was generated
     if (w.demo) return;
-    aud('setSong', w.songId);
     var z = 0;
     while (z + 1 < ZONES.length && seg * SEG_GATES >= ZONES[z + 1][0]) z++;
     if (z === w.zone) return;
     w.zone = z;
     w.bgFrom = lerpBg(); w.bgIdx = z; w.bgTo = bgAt(z); w.bgT = 0;
     w.banner = { s: ZONES[z][1], sub: 'Zone ' + (z + 1), t: 2, max: 2 };
-    aud('chime'); aud('setLayer', z);
+    aud('chime'); aud('setLayer', z); aud('setZone', z);
     if (z >= 1) feat('zone1');
     if (z >= 2) feat('zone2');
     if (z >= 4) feat('zone4');
@@ -686,7 +743,7 @@
     st.score += pts(1);
     gateCounted(false);
     w.scoreAnim = 0.15;
-    aud('pip');
+    gateNote(g, 'hole');
     // the slide lesson is learnt once the player has slid this run and passes an offset hole
     if (!w.demo && !data.slideOk && w.slid >= 0.3 && Math.abs(g.x) > 0.05) { data.slideOk = true; persist(); }
     if (MP.headless) return;
@@ -716,6 +773,7 @@
     }
     gateCounted(perfect);
     w.scoreAnim = 0.2;
+    gateNote(g, perfect ? 'perfect' : 'great');
     aud('smash', w.streak);
     if (perfect) aud('perfect', w.streak);
     if (!w.demo) { w.shake = 0.12; w.shakeAmp = 6; w.hitStop = 0.04; }
@@ -726,6 +784,8 @@
     var w = W;
     g.state = 4; g.perf = isPerfect(dist); g.tk = 0; g.scraped = false;
     w.tickN = 0;
+    // the long note starts as the mallow enters: 'snap' = perfect entry (a SNAP is still possible), else 'good'
+    gateNote(g, g.perf ? 'snap' : 'good');
     aud('smash', w.streak);
     if (!w.demo) { w.shake = 0.08; w.shakeAmp = 4; }
     burst(14, false);
@@ -761,7 +821,7 @@
       streakBreak();
       st.score += pts(2, true);
       addText('GOOD', p.x, p.y - S * 1.6, '#ffffff', 0.8);
-      aud('pip');
+      if (!hasAud('hitNote')) aud('pip');
     }
     gateCounted(good);
     w.scoreAnim = 0.2;
@@ -784,11 +844,12 @@
   function collectLolli(g) {
     var w = W;
     g.got = true;
+    if (hasAud('lolliNote')) aud('lolliNote', g.beat - g.lb);
     if (w.demo) return;
     w.lollis++; w.lollisC++;
     var n = pts(5);
     st.score += n; w.scoreAnim = 0.2;
-    aud('lolli');
+    if (!hasAud('lolliNote')) aud('lolli');
     if (w.lollis >= 3) feat('lolli3');
     liveChecks();
     if (MP.headless) return;
@@ -801,6 +862,8 @@
     var w = W;
     if (g.type === 'taffy') leaveTaffy();
     if (w.demo || w.invT > 0) {
+      // passes through (demo, revive shield): the melody keeps going unless the long note already sounded
+      if (g.type !== 'taffy' || g.state === 0) gateNote(g, 'good');
       if (g.type === 'hole') g.state = 1; else { g.state = 2; g.t = 0; burst(20, false); }
       if (g.type !== 'wall') nudgeTo(g.x);
       return;
@@ -812,6 +875,7 @@
       if (g.type !== 'wall') nudgeTo(g.x);
       w.hint = true; w.hitT = 0.5; w.shake = 0.2; w.shakeAmp = 8;
       streakBreak();
+      aud('missNote', g.step);
       aud('boing');
       var p = here();
       addText(TIPS[cause], p.x, p.y - unit() * 2.2, '#ffffff', 0.7, 1.6);
@@ -825,6 +889,7 @@
     var w = W;
     if (w.snap) endSnap(false);
     g.state = 3;
+    aud('missNote', g.step);
     w.failGate = g; w.dead = true; w.deadT = 0; w.hitT = 9;
     // ghost = what would have worked: small (1) or puffed (2), drawn at lateral w.ghostX
     w.cause = cause; w.ghost = cause === 'hole' || cause === 'side' ? 1 : 2;

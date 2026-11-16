@@ -19,16 +19,21 @@
   .row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
   button { font-size: 18px; font-weight: 800; border: 0; border-radius: 99px; padding: 12px 22px; color: #fff; background: #ff5fa2; cursor: pointer; }
   button.alt { background: #8a5bd6; }
+  .fx button { font-size: 14px; padding: 8px 14px; background: #b58be8; }
   .modes { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-  .modes label { font-weight: 400; margin: 0; }
-  #now { margin-top: 12px; font-size: 14px; min-height: 1.4em; }
+  .modes label, .opts label { font-weight: 400; margin: 0; }
+  .opts { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 12px; }
+  #now { margin-top: 12px; font-size: 14px; min-height: 2.8em; }
+  #err { color: #c0392b; font-weight: 700; }
   @media (max-width: 480px) { .styles { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <main>
   <h1>Mallow Pop – music styles</h1>
-  <p>Pick a style and a song, then press Play. These are the game's own songs played by the same kind of synth the game uses (no audio files). Use headphones if you can.</p>
+  <p>This page plays the game's real music engine and songs (no audio files). In the game, the gates come from the
+    melody: each gate you clear plays its melody note, snapped to the beat. Use headphones, or try it on a phone speaker too.</p>
+  <div id="err"></div>
   <div class="styles" id="styles"></div>
 
   <label for="song">Song</label>
@@ -39,10 +44,14 @@
 
   <label>Melody</label>
   <div class="modes">
-    <label><input type="radio" name="mode" value="full" checked> Full song (perfect play)</label>
-    <label><input type="radio" name="mode" value="player"> Player plays the melody: notes snap to the beat (new design), 1 in 8 notes missed</label>
-    <label><input type="radio" name="mode" value="old"> Like v1.2 now: melody off, random in-scale blips at loose timing</label>
-    <label><input type="radio" name="mode" value="backing"> Backing only (no melody)</label>
+    <label><input type="radio" name="mode" value="player" checked> Player: about 70% of the notes are gates, 1 in 8 missed, taps up to 60 ms early or 80 ms late (early notes snap to the beat), with game sound effects</label>
+    <label><input type="radio" name="mode" value="perfect"> Perfect play: every melody note is a gate, all cleared</label>
+    <label><input type="radio" name="mode" value="full"> No player: the backing plays the whole melody as quiet filler notes</label>
+    <label><input type="radio" name="mode" value="backing"> Backing only (every melody note is a gate, none played)</label>
+  </div>
+  <div class="opts">
+    <label><input type="checkbox" id="rush"> Sugar Rush (brighter, key up, 10% faster)</label>
+    <label><input type="checkbox" id="sfx" checked> Game sound effects in player mode</label>
   </div>
 
   <div class="row">
@@ -50,194 +59,188 @@
     <button id="stop" class="alt">■ Stop</button>
   </div>
   <div id="now"></div>
+
+  <label>Sound effects (current style and key)</label>
+  <div class="row fx" id="fx"></div>
 </main>
 <script>window.MP = window.MP || {};</script>
-<script src="js/songs.js"></script>
 <script>
 (function () {
-  var STYLES = [
-    { id: 'nes', name: 'A. NES Classic', desc: 'Crisp pulse waves, triangle bass, noise drums. Dry and punchy, like classic 8-bit consoles.' },
-    { id: 'soft', name: 'B. Soft Chip', desc: 'Same chip voices but rounded: filtered, chorus, echo and reverb. Cosy, lo-fi, easy on the ears.' },
-    { id: 'box', name: 'C. Music Box', desc: 'Bell lead, marimba chords, soft plucked bass, wooden percussion. Cute and toy-like.' },
-    { id: 'pop', name: 'D. Synth Pop', desc: 'Bright detuned lead, chord pads, punchy drums, echo. Modern, upbeat and energetic.' }
-  ];
-  var style = 'soft', ctx = null, master, dry, revSend, echoSend, timer = null, step = 0, nextT = 0, song = null, playing = false;
+  // load the engine from js/ (deployed next to the game) or ../game/js/ (local checkout)
+  var files = ['songs.js', 'audio.js'], bases = ['js/', '../game/js/'];
+  function load(i, b) {
+    if (i >= files.length) { init(); return; }
+    var s = document.createElement('script');
+    s.src = bases[b] + files[i];
+    s.onload = function () { load(i + 1, b); };
+    s.onerror = function () {
+      s.parentNode.removeChild(s);
+      if (b + 1 < bases.length) load(i, b + 1);
+      else document.getElementById('err').textContent = 'Could not load the game scripts (' + files[i] + ').';
+    };
+    document.head.appendChild(s);
+  }
+  load(0, 0);
 
-  function $(id) { return document.getElementById(id); }
-  function midi(n) { return 440 * Math.pow(2, (n - 69) / 12); }
-  function mode() { var r = document.querySelector('input[name=mode]:checked'); return r ? r.value : 'full'; }
+  function init() {
+    var A = MP.audio, SONGS = MP.songs;
+    var STYLES = [
+      { id: 'box', name: 'Music Box', desc: 'Bell melody, marimba chords, soft plucked bass, wooden percussion. Cute and toy-like. (default)' },
+      { id: 'soft', name: 'Soft Chip', desc: 'Rounded chip voices: filtered squares, chorus, echo and reverb. Cosy and lo-fi.' },
+      { id: 'pop', name: 'Synth Pop', desc: 'Bright detuned saw lead, chord pads, punchy drums, echo. Upbeat and energetic.' },
+      { id: 'auto', name: 'Auto', desc: 'Changes with the zone: Music Box in zones 1–3, Soft Chip in zone 4, Synth Pop in zones 5–6.' }
+    ];
+    var ZN = ['Marshmallow Meadow', 'Candy Clouds', 'Jelly Lake', 'Sprinkle Sky', 'Starlight Sundae', 'Rainbow Road'];
+    var ZBPM = [100, 112, 124, 136, 148, 160];
+    var NAMES = { box: 'Music Box', soft: 'Soft Chip', pop: 'Synth Pop' };
+    var style = 'box', song = null, playing = false, timer = null;
+    var t0 = 0, bpm = 112, segs = [], scan = 0, events = [], stats = { hit: 0, miss: 0, fill: 0 };
+    var seed = 7;
+    function $(id) { return document.getElementById(id); }
+    function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
+    function mode() { var r = document.querySelector('input[name=mode]:checked'); return r ? r.value : 'player'; }
 
-  STYLES.forEach(function (s) {
-    var d = document.createElement('div');
-    d.className = 'st' + (s.id === style ? ' on' : '');
-    d.innerHTML = '<b></b><span></span>';
-    d.querySelector('b').textContent = s.name; d.querySelector('span').textContent = s.desc;
-    d.onclick = function () { style = s.id; [].forEach.call(document.querySelectorAll('.st'), function (e) { e.classList.remove('on'); }); d.classList.add('on'); info(); };
-    $('styles').appendChild(d);
-  });
-  var ZN = ['Marshmallow Meadow', 'Candy Clouds', 'Jelly Lake', 'Sprinkle Sky', 'Starlight Sundae', 'Rainbow Road'];
-  MP.songs.list.forEach(function (s, i) {
-    var o = document.createElement('option'); o.value = i; o.textContent = ZN[s.zone] + ' – ' + s.name; $('song').appendChild(o);
-  });
-  $('bpm').oninput = function () { $('bpmv').textContent = this.value; };
-
-  function ensure() {
-    if (ctx) return;
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
-    master = ctx.createGain(); master.gain.value = 0.5;
-    var comp = ctx.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4;
-    master.connect(comp); comp.connect(ctx.destination);
-    var an = ctx.createAnalyser(); an.fftSize = 2048; comp.connect(an); window.__meter = function () { var b = new Float32Array(an.fftSize); an.getFloatTimeDomainData(b); var r = 0, pk = 0; for (var i = 0; i < b.length; i++) { r += b[i] * b[i]; pk = Math.max(pk, Math.abs(b[i])); } return [Math.sqrt(r / b.length), pk]; };
-    dry = ctx.createGain(); dry.connect(master);
-    // reverb: generated impulse response
-    var len = ctx.sampleRate * 2.2, ir = ctx.createBuffer(2, len, ctx.sampleRate);
-    for (var c = 0; c < 2; c++) { var ch = ir.getChannelData(c); for (var i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3); }
-    var conv = ctx.createConvolver(); conv.buffer = ir;
-    revSend = ctx.createGain(); revSend.connect(conv); var rg = ctx.createGain(); rg.gain.value = 0.55; conv.connect(rg); rg.connect(master);
-    // echo
-    echoSend = ctx.createGain();
-    var dl = ctx.createDelay(1), fb = ctx.createGain(), lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 3000; fb.gain.value = 0.32;
-    echoSend.connect(dl); dl.connect(lp); lp.connect(fb); fb.connect(dl); lp.connect(master);
-    echoSend.dl = dl;
-  }
-
-  var pulseCache = {};
-  function pulse(duty) {
-    if (pulseCache[duty]) return pulseCache[duty];
-    var n = 32, re = new Float32Array(n), im = new Float32Array(n);
-    // Fourier series of a pulse wave with the given duty cycle
-    for (var k = 1; k < n; k++) { re[k] = Math.sin(2 * Math.PI * k * duty) / (k * Math.PI); im[k] = (1 - Math.cos(2 * Math.PI * k * duty)) / (k * Math.PI); }
-    return (pulseCache[duty] = ctx.createPeriodicWave(re, im));
-  }
-  function sends(node, rev, echo) {
-    node.connect(dry);
-    if (rev) { var a = ctx.createGain(); a.gain.value = rev; node.connect(a); a.connect(revSend); }
-    if (echo) { var b = ctx.createGain(); b.gain.value = echo; node.connect(b); b.connect(echoSend); }
-  }
-  function osc(type, f, t, dur, vol, o) {
-    o = o || {};
-    var g = ctx.createGain(), s = ctx.createOscillator(), out = g;
-    if (type.duty) s.setPeriodicWave(pulse(type.duty)); else s.type = type;
-    s.frequency.setValueAtTime(f, t);
-    if (o.slide) s.frequency.exponentialRampToValueAtTime(o.slide, t + (o.slideT || dur));
-    if (o.detune) s.detune.value = o.detune;
-    if (o.vib) { var l = ctx.createOscillator(), lg = ctx.createGain(); l.frequency.value = 5.5; lg.gain.value = f * o.vib; l.connect(lg); lg.connect(s.frequency); l.start(t + 0.12); l.stop(t + dur + 0.3); }
-    var a = o.att || 0.005, r = o.rel || 0.05, sus = o.sus != null ? o.sus : 1;
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.linearRampToValueAtTime(vol, t + a);
-    if (o.decay) g.gain.exponentialRampToValueAtTime(Math.max(0.0001, vol * sus), t + a + o.decay);
-    g.gain.setValueAtTime(Math.max(0.0001, vol * (o.decay ? sus : 1)), t + Math.max(a, dur));
-    g.gain.exponentialRampToValueAtTime(0.0001, t + Math.max(a, dur) + r);
-    if (o.lp) { var f2 = ctx.createBiquadFilter(); f2.type = 'lowpass'; f2.frequency.setValueAtTime(o.lp, t); if (o.lpEnd) f2.frequency.exponentialRampToValueAtTime(o.lpEnd, t + dur); f2.Q.value = o.q || 0.7; g.connect(f2); out = f2; }
-    s.connect(g); s.start(t); s.stop(t + Math.max(a, dur) + r + 0.05);
-    return out;
-  }
-  var noiseBuf = null;
-  function noise(t, dur, vol, f, type, rev) {
-    if (!noiseBuf) { noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate); var d = noiseBuf.getChannelData(0); for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; }
-    var s = ctx.createBufferSource(), g = ctx.createGain(), fl = ctx.createBiquadFilter();
-    s.buffer = noiseBuf; fl.type = type || 'highpass'; fl.frequency.value = f;
-    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    s.connect(fl); fl.connect(g); sends(g, rev || 0, 0); s.start(t, Math.random() * 0.5); s.stop(t + dur + 0.02);
-  }
-  function fm(f, t, dur, vol, ratio, index, rev, echo) {
-    var c = ctx.createOscillator(), m = ctx.createOscillator(), mg = ctx.createGain(), g = ctx.createGain();
-    c.type = 'sine'; m.type = 'sine'; c.frequency.value = f; m.frequency.value = f * ratio;
-    mg.gain.setValueAtTime(f * index, t); mg.gain.exponentialRampToValueAtTime(f * 0.05, t + dur);
-    m.connect(mg); mg.connect(c.frequency);
-    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    c.connect(g); sends(g, rev, echo);
-    c.start(t); m.start(t); c.stop(t + dur + 0.05); m.stop(t + dur + 0.05);
-  }
-
-  // one voice per role and style
-  function lead(n, t, d) {
-    var f = midi(n);
-    if (style === 'nes') sends(osc({ duty: 0.25 }, f, t, d * 0.9, 0.16, { vib: 0.004, rel: 0.03 }), 0, 0);
-    else if (style === 'soft') {
-      var a = osc({ duty: 0.5 }, f, t, d * 0.95, 0.12, { att: 0.02, vib: 0.006, lp: 2400, rel: 0.12 });
-      var b = osc({ duty: 0.5 }, f, t, d * 0.95, 0.06, { att: 0.02, detune: 9, lp: 2400, rel: 0.12 });
-      sends(a, 0.35, 0.22); sends(b, 0.35, 0.22);
-    } else if (style === 'box') { fm(f * 2, t, Math.max(0.9, d * 1.5), 0.17, 3.5, 2.2, 0.45, 0.2); fm(f * 4, t, 0.35, 0.03, 1, 1, 0.3, 0); }
-    else {
-      sends(osc('sawtooth', f, t, d * 0.9, 0.07, { detune: -8, att: 0.01, lp: 4500, lpEnd: 1800, rel: 0.1, vib: 0.004 }), 0.3, 0.3);
-      sends(osc('sawtooth', f, t, d * 0.9, 0.07, { detune: 8, att: 0.01, lp: 4500, lpEnd: 1800, rel: 0.1 }), 0.3, 0.3);
-    }
-  }
-  function bass(n, t, d) {
-    var f = midi(n);
-    if (style === 'nes') sends(osc('triangle', f, t, d * 0.9, 0.3, { rel: 0.02 }), 0, 0);
-    else if (style === 'soft') { sends(osc('triangle', f, t, d * 0.9, 0.28, { att: 0.01, rel: 0.08 }), 0.08, 0); sends(osc('sine', f / 2, t, d * 0.9, 0.18, { att: 0.01, rel: 0.08 }), 0, 0); }
-    else if (style === 'box') sends(osc('sine', f, t, Math.min(d, 0.5), 0.36, { decay: 0.35, sus: 0.2, rel: 0.12 }), 0.15, 0);
-    else { sends(osc({ duty: 0.5 }, f, t, d * 0.8, 0.12, { lp: 900, rel: 0.04 }), 0, 0); sends(osc('sine', f / 2, t, d * 0.8, 0.2, { rel: 0.04 }), 0, 0); }
-  }
-  function arp(n, t, d) {
-    var f = midi(n);
-    if (style === 'nes') sends(osc({ duty: 0.125 }, f, t, d * 0.7, 0.045, { rel: 0.02 }), 0, 0);
-    else if (style === 'soft') sends(osc('triangle', f, t, d * 0.8, 0.05, { att: 0.005, lp: 3000, rel: 0.08 }), 0.4, 0.15);
-    else if (style === 'box') fm(f, t, 0.45, 0.07, 4, 1.2, 0.35, 0);
-    else sends(osc({ duty: 0.25 }, f, t, d * 0.6, 0.035, { lp: 3500, rel: 0.05 }), 0.25, 0.3);
-  }
-  function pad(pcs, root, t, dur) {
-    if (style !== 'pop' && style !== 'soft') return;
-    pcs.forEach(function (pc) {
-      var f = midi(48 + ((pc + 12) % 12) + 12);
-      if (style === 'pop') sends(osc('sawtooth', f, t, dur, 0.025, { att: 0.25, lp: 1600, rel: 0.4, detune: 6 }), 0.5, 0);
-      else sends(osc('triangle', f, t, dur, 0.03, { att: 0.3, rel: 0.5 }), 0.6, 0);
+    STYLES.forEach(function (s) {
+      var d = document.createElement('div');
+      d.className = 'st' + (s.id === style ? ' on' : '');
+      d.innerHTML = '<b></b><span></span>';
+      d.querySelector('b').textContent = s.name; d.querySelector('span').textContent = s.desc;
+      d.onclick = function () {
+        style = s.id;
+        [].forEach.call(document.querySelectorAll('.st'), function (e) { e.classList.remove('on'); });
+        d.classList.add('on');
+        A.unlock();
+        if (song) A.setZone(song.zone);
+        if (playing) A.setStyle(style); // lands on the next bar line
+        else if (A.previewStyle) A.previewStyle(style); else A.setStyle(style);
+        info();
+      };
+      $('styles').appendChild(d);
     });
-  }
-  function drums(d, t, big) {
-    var v = style === 'box' ? 0.6 : style === 'soft' ? 0.75 : 1;
-    if (d & 1) {
-      if (style === 'box') sends(osc('sine', 120, t, 0.12, 0.35, { slide: 60, slideT: 0.1 }), 0.1, 0);
-      else sends(osc('sine', style === 'pop' ? 160 : 150, t, 0.16, 0.8 * v, { slide: 42, slideT: 0.14 }), 0, 0);
-    }
-    if (d & 2) {
-      if (style === 'box') { sends(osc('sine', 820, t, 0.06, 0.12, { slide: 600, slideT: 0.05 }), 0.2, 0); noise(t, 0.05, 0.06, 3000, 'bandpass', 0.2); }
-      else { noise(t, 0.13, 0.28 * v, style === 'pop' ? 1600 : 2200, 'highpass', style === 'nes' ? 0 : 0.3); sends(osc('triangle', 190, t, 0.07, 0.2 * v, { slide: 140 }), 0, 0); }
-    }
-    if (d & 4) noise(t, style === 'box' ? 0.03 : 0.035, (style === 'box' ? 0.04 : 0.08) * v, style === 'box' ? 6000 : 8000, 'highpass', 0);
-    if (d & 8) noise(t, 0.14, 0.07 * v, 7000, 'highpass', 0.1);
-    if ((d & 16) && big) noise(t, 0.6, 0.08 * v, 5000, 'highpass', 0.4);
-  }
+    SONGS.list.forEach(function (s, i) {
+      var o = document.createElement('option'); o.value = i; o.textContent = ZN[s.zone] + ' – ' + s.name; $('song').appendChild(o);
+    });
+    song = SONGS.list[0];
 
-  var rng = 1;
-  function rnd() { rng = (rng * 16807) % 2147483647; return rng / 2147483647; }
-  function schedule() {
-    var bpm = +$('bpm').value, sp = 60 / bpm / 4, m = mode();
-    echoSend.dl.delayTime.value = sp * 3;
-    while (nextT < ctx.currentTime + 0.15) {
-      var i = step % song.steps, t = nextT, s = song;
-      if (i % 8 === 0) { var ci = Math.floor(i / 8); if (s.chordPcs[ci]) pad(s.chordPcs[ci], s.tonic, t, sp * 8 * 0.98); }
-      if (s.bass[i]) bass(s.bass[i], t, s.bassDur[i] * sp);
-      if (s.arp[i]) arp(s.arp[i], t, s.arpDur[i] * sp);
-      if (s.drum[i]) drums(s.drum[i], t, i % 64 === 0);
-      if (s.lead[i]) {
-        if (m === 'full') lead(s.lead[i], t, s.leadDur[i] * sp);
-        else if (m === 'player') { if (rnd() > 0.125) lead(s.lead[i], t, s.leadDur[i] * sp); }
-        else if (m === 'old' && rnd() < 0.6) {
-          var pen = s.penta, nn = s.tonic + 12 + pen[(rnd() * pen.length) | 0];
-          var off = (rnd() - 0.5) * 0.12;
-          sends(osc('square', midi(nn), Math.max(ctx.currentTime, t + off), 0.08, 0.06, { rel: 0.03 }), 0, 0);
+    function curBpm() { return bpm * ($('rush').checked ? 1.1 : 1); }
+    function ctxNow() { return A.context ? A.context.currentTime : 0; }
+    function beatNow() { return (ctxNow() - t0) * curBpm() / 60; }
+    function songAt(k) { var s = segs[0]; for (var i = 0; i < segs.length; i++) if (segs[i].start <= k) s = segs[i]; return s; }
+    function timeOfBeat(b) { return t0 + b * 60 / curBpm(); }
+
+    $('bpm').oninput = function () {
+      var b = playing ? beatNow() : 0;
+      bpm = +this.value; $('bpmv').textContent = bpm;
+      if (playing) t0 = ctxNow() - b * 60 / curBpm(); // keep the beat continuous
+    };
+    $('rush').onchange = function () {
+      var b = playing ? beatNow() : 0, on = this.checked;
+      A.setRush(on);
+      if (playing) t0 = ctxNow() - b * 60 / curBpm();
+      if (on && playing) A.chime();
+      info();
+    };
+
+    // gates for steps up to 2 beats ahead: own them, plan the tap (or the miss)
+    function plan(limitStep) {
+      var m = mode();
+      while (scan <= limitStep) {
+        var k = scan++, sg = songAt(k), s = sg.song, i = ((k - sg.start) % s.steps + s.steps) % s.steps;
+        if (!s.lead[i] || m === 'full') continue;
+        var gate = m !== 'player' || rnd() < 0.7;
+        if (!gate) continue;
+        A.ownStep(k);
+        if (m === 'backing') continue;
+        var miss = m === 'player' && rnd() < 0.125;
+        var jit = m === 'player' ? (rnd() - 0.43) * 0.14 : -0.03;
+        var kinds = ['perfect', 'great', 'perfect', 'good', 'hole', 'great'];
+        events.push({ b: k / 4, jit: jit, k: k, m: s.lead[i], beats: s.leadDur[i] / 4, miss: miss, kind: m === 'perfect' ? 'perfect' : kinds[(k * 5) % kinds.length], type: 'gate' });
+        if (m === 'player' && $('sfx').checked && !miss) events.push({ b: k / 4, jit: -0.17, type: 'puff' });
+        if (m === 'player' && !miss && s.leadDur[i] >= 6) {
+          for (var h = 1; h * 0.5 < s.leadDur[i] / 4; h++) events.push({ b: k / 4 + h * 0.5, jit: 0.01, type: 'tick', n: h });
         }
       }
-      nextT += sp; step++;
     }
+
+    function fire(e) {
+      if (e.type === 'puff') { A.puff(); return; }
+      if (e.type === 'tick') { A.tickNote(e.b, e.n); return; }
+      if (e.miss) { A.missNote(e.k); stats.miss++; return; }
+      A.hitNote(e.k, e.m, e.beats, e.kind);
+      stats.hit++;
+      if (mode() === 'player' && $('sfx').checked) { if (e.kind !== 'hole') A.smash(3); if (e.kind === 'perfect') A.perfect(3); }
+    }
+
+    function tick() {
+      if (!playing) return;
+      var b = beatNow(), now = ctxNow();
+      plan(Math.floor((b + 2) * 4));
+      for (var i = 0; i < events.length; i++) {
+        var e = events[i];
+        if (timeOfBeat(e.b) + e.jit <= now) { events.splice(i, 1); i--; fire(e); }
+      }
+      if (b >= -0.05) A.musicTick(b, curBpm()); // from just before beat 0 (step 0 is in the lookahead)
+      if (((b * 4) | 0) % 8 === 0) info();
+    }
+
+    function info() {
+      if (!song) return;
+      var st = A.getActiveStyle ? A.getActiveStyle() : style;
+      var cur = playing ? songAt(Math.max(0, Math.floor(beatNow() * 4))).song : song;
+      $('now').textContent = (playing ? 'Playing: ' : 'Ready: ') + cur.name + ' – ' + (NAMES[st] || st) + (style === 'auto' ? ' (Auto, zone ' + (cur.zone + 1) + ')' : '') +
+        ' – key ' + ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'][cur.key] + ' ' + cur.mode +
+        ($('rush').checked ? ' – Sugar Rush' : '') + (playing && mode() !== 'full' && mode() !== 'backing' ? ' – notes played ' + stats.hit + ', missed ' + stats.miss : '');
+    }
+
+    $('play').onclick = function () {
+      A.unlock();
+      var ctx = A.context;
+      if (!ctx) { $('err').textContent = 'WebAudio is not available in this browser.'; return; }
+      song = SONGS.list[+$('song').value];
+      A.stopMusic();
+      A.setZone(song.zone); A.setStyle(style); A.setLayer(song.zone); A.setRush($('rush').checked);
+      bpm = ZBPM[song.zone]; $('bpm').value = bpm; $('bpmv').textContent = bpm;
+      segs = [{ start: 0, song: song }]; scan = 0; events = []; stats = { hit: 0, miss: 0 }; seed = 7;
+      A.ownStep(-1000); // a new set of owned steps
+      A.queueSong(song.id, 0);
+      t0 = ctx.currentTime + 0.25;
+      A.startMusic();
+      playing = true;
+      clearInterval(timer); timer = setInterval(tick, 16); tick(); info();
+    };
+    $('stop').onclick = function () { playing = false; clearInterval(timer); timer = null; A.stopMusic(); events = []; info(); };
+    // changing the song while playing: switch exactly at the next bar line (as a new segment does in the game)
+    $('song').onchange = function () {
+      var ns = SONGS.list[+this.value];
+      if (!playing) { song = ns; info(); return; }
+      var startBeat = Math.ceil(beatNow() / 4 + 0.5) * 4, startK = startBeat * 4;
+      // gates already planned beyond the switch belong to the old song: drop them
+      events = events.filter(function (e) { return e.b < startBeat; });
+      scan = Math.min(scan, startK);
+      segs = segs.filter(function (s) { return s.start < startK; });
+      segs.push({ start: startK, song: ns });
+      A.queueSong(ns.id, startBeat);
+      A.setZone(ns.zone); A.setLayer(ns.zone);
+      song = ns;
+      info();
+    };
+    $('song').value = 0; info();
+
+    var FX = ['puff', 'smash', 'perfect', 'pip', 'snap', 'chime', 'lolliNote', 'tickNote', 'missNote', 'crack', 'scrape', 'boing', 'aww', 'unlockJingle'];
+    FX.forEach(function (n) {
+      var b = document.createElement('button');
+      b.textContent = n === 'tickNote' ? 'taffy ticks' : n === 'lolliNote' ? 'lollipop' : n === 'missNote' ? 'miss' : n;
+      b.onclick = function () {
+        A.unlock();
+        if (!playing) A.setStyle(style);
+        if (n === 'tickNote') { for (var j = 1; j <= 8; j++) (function (j) { setTimeout(function () { A.tickNote(null, j); }, (j - 1) * 150); })(j); }
+        else if (n === 'lolliNote') A.lolliNote();
+        else if (n === 'missNote') A.missNote(0);
+        else A[n](3);
+      };
+      $('fx').appendChild(b);
+    });
   }
-  function info() {
-    if (!song) return;
-    var st = STYLES.filter(function (x) { return x.id === style; })[0];
-    $('now').textContent = (playing ? 'Playing: ' : 'Ready: ') + song.name + ' – ' + st.name + ' (key ' + ['C', 'C#', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'][song.key] + ' ' + song.mode + ')';
-  }
-  $('play').onclick = function () {
-    ensure(); if (ctx.state === 'suspended') ctx.resume();
-    song = MP.songs.list[+$('song').value]; step = 0; rng = 7; nextT = ctx.currentTime + 0.1; playing = true;
-    clearInterval(timer); timer = setInterval(schedule, 25); schedule(); info();
-  };
-  $('stop').onclick = function () { clearInterval(timer); timer = null; playing = false; info(); };
-  $('song').onchange = function () { if (playing) $('play').onclick(); };
-  song = MP.songs.list[0]; info();
 })();
 </script>
 </body>

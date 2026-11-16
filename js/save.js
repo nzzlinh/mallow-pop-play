@@ -93,7 +93,8 @@
       goals: { date: t, list: makeGoals(t) },
       stickers: 0, mute: false, runs: 0,
       sv: 1, bestGates: 0, dailyBestGates: 0, recent: [], feats: {}, freeRev: '', shortRuns: 0,
-      slideOk: false          // v1.2: passed an offset hole (ends the slide lesson)
+      slideOk: false,         // v1.2: passed an offset hole (ends the slide lesson)
+      musicStyle: 'box'       // v1.3: 'box' | 'soft' | 'pop' | 'auto'
     };
   }
 
@@ -131,6 +132,7 @@
     if (d.sv < 2) { d.sv = 2; d.best = 0; d.dailyBest = 0; }
     if (!d.feats || typeof d.feats !== 'object') d.feats = {};
     if (!Array.isArray(d.recent)) d.recent = [];
+    if (['box', 'soft', 'pop', 'auto'].indexOf(d.musicStyle) < 0) d.musicStyle = 'box';
     return d;
   }
 
