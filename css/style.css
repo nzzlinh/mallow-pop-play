@@ -185,3 +185,30 @@ button { font: inherit; color: inherit; border: 0; cursor: pointer; pointer-even
   #skins .card .lock { width: calc(var(--u) * .45); height: calc(var(--u) * .45); }
 }
 @media (orientation: landscape) { #skins .card.locked { font-size: calc(var(--u) * .26); } }
+
+/* v1.2 unlock popup: one panel for all new skins, scrolls inside instead of overflowing */
+#unlock { padding: calc(var(--u) * .5); gap: calc(var(--u) * .5); overflow: hidden; }
+#unlock .panel { display: flex; flex-direction: column; align-items: center; flex: 0 1 auto; min-height: 0; max-width: 96vw; }
+#unlock .panel > * { flex: none; }
+#unlock .ugrid { flex: 0 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; width: 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: calc(var(--u) * .25); margin-top: calc(var(--u) * .4); padding: calc(var(--u) * .05); touch-action: pan-y; -webkit-overflow-scrolling: touch; }
+#unlock .ucard { background: #f6ecff; border: calc(var(--u) * .1) solid #e2cfff; border-radius: calc(var(--u) * .6); padding: calc(var(--u) * .15) calc(var(--u) * .1); color: #6b34b8;
+  font-size: calc(var(--u) * .42); line-height: 1.1; min-width: 0; overflow-wrap: break-word; font-size: calc(var(--u) * .3); }
+#unlock .ucard canvas { width: 100%; max-width: calc(var(--u) * 2.2); aspect-ratio: 1; display: block; margin: 0 auto; }
+#unlock.multi .panel { width: calc(var(--u) * 8.8); padding-left: calc(var(--u) * .5); padding-right: calc(var(--u) * .5); }
+#unlock.multi #unlockCv, #unlock.multi #unlockName { display: none; }
+#unlock.multi .btn.okb { width: auto; min-width: calc(var(--u) * 5.2); flex-direction: row; gap: calc(var(--u) * .3); padding: 0 calc(var(--u) * .8); font-size: calc(var(--u) * .9); font-weight: 900; }
+#unlock.multi .btn.okb svg { width: calc(var(--u) * 1); height: calc(var(--u) * 1); }
+#unlock.multi .btn.okb span { white-space: nowrap; }
+@media (orientation: landscape) {
+  #unlock { padding: calc(var(--u) * .4); gap: calc(var(--u) * .35); }
+  #unlock.multi .panel { width: calc(var(--u) * 15); padding: calc(var(--u) * .4) calc(var(--u) * .6); }
+  #unlock .ugrid { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: calc(var(--u) * .2); margin-top: calc(var(--u) * .2); }
+  #unlock .ucard { font-size: calc(var(--u) * .27); padding: calc(var(--u) * .1) 0; }
+  #unlock .ucard canvas { max-width: calc(var(--u) * 1.5); }
+  #unlock.multi .btn.okb { height: calc(var(--u) * 1.5); min-width: calc(var(--u) * 4.4); font-size: calc(var(--u) * .75); }
+  #unlock .btn.okb { height: calc(var(--u) * 1.5); }
+}
+/* names wrap only between words */
+#unlock .ucard { overflow-wrap: normal; word-break: normal; font-size: calc(var(--u) * .27); padding-left: 0; padding-right: 0; letter-spacing: -.01em; }
+@media (orientation: landscape) { #unlock .ucard { font-size: calc(var(--u) * .24); } }

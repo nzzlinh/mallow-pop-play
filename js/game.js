@@ -1,8 +1,15 @@
 (function () {
   var MP = window.MP = window.MP || {};
   var C = MP.cfg, DT = 1 / 120, GRACE = C.GRACE, PUFF_SCALE = 2.0;
+  // v1.2 lateral rules; the defaults cover a generator that does not define them yet
+  var LAT = C.LAT || 1.8, HOLE_TOL = C.HOLE_TOL || 0.45, TAFFY_TOL = C.TAFFY_TOL || 0.60, TAFFY_FAIL = C.TAFFY_FAIL || 1.20;
+  var STEER_KEY = C.STEER_KEY || 5.0, TICK_BEATS = C.TICK_BEATS || 0.5, SEG_GATES = 25, GLIDE = 14, DEMO_OFFSET = 30;
+  // zone of a 25-gate segment = the zone whose gate threshold the segment start has reached (songs.js uses the same table)
   var ZONES = [[0, 'Marshmallow Meadow'], [25, 'Candy Clouds'], [50, 'Jelly Lake'], [75, 'Sprinkle Sky'], [100, 'Starlight Sundae'], [150, 'Rainbow Road']];
-  var TIPS = { wall: 'Puff into pink walls!', hole: 'Stay small for green holes!', taffy: 'Hold through the taffy!', early: 'Too early! Wait for it...' };
+  var TIPS = {
+    wall: 'Puff into pink walls!', hole: 'Stay small for green holes!', taffy: 'Hold through the taffy!', early: 'Too early! Wait for it...',
+    side: 'Slide while big to line up!', path: 'Follow the taffy path!'
+  };
   var BG = [
     [[190, 232, 255], [255, 226, 242]], [[217, 204, 255], [255, 240, 214]], [[255, 217, 194], [255, 246, 201]],
     [[201, 240, 255], [231, 216, 255]], [[255, 209, 232], [217, 241, 255]], [[255, 241, 168], [255, 214, 232]]
@@ -10,7 +17,7 @@
   var CANDY = ['#ff86bd', '#ffc3de', '#ffffff', '#ffd84d', '#e0508f'];
   var G = MP.game = {};
   var st = G.state = { mode: 'menu', score: 0, gates: 0, combo: 0, mult: 1, alive: true, running: false, paused: false, daily: false };
-  var W = null, data = null, acc = 0, lastFrameMs = 0, runsDone = 0, busy = false, musicOn = false, tipSeen = {};
+  var W = null, data = null, acc = 0, lastFrameMs = 0, runsDone = 0, busy = false, musicOn = false, tipSeen = {}, steerDir = 0;
 
   function sdk(name) {
     var s = MP.sdk;
@@ -19,10 +26,10 @@
     }
     return undefined;
   }
-  function aud(name, a) {
+  function aud(name, a, b) {
     if (W && W.demo) return;
     var s = MP.audio;
-    if (s && typeof s[name] === 'function') { try { s[name](a); } catch (e) { /* ignore */ } }
+    if (s && typeof s[name] === 'function') { try { s[name](a, b); } catch (e) { /* ignore */ } }
   }
   function ui(name, a, b) {
     if (MP.ui && typeof MP.ui[name] === 'function') return MP.ui[name](a, b);
@@ -39,6 +46,28 @@
   function rnd(a, b) { return a + Math.random() * (b - a); }
   function lerp(a, b, t) { return a + (b - a) * t; }
   function bgAt(i) { return BG[i % BG.length]; }
+  function clampLat(x) { return x < -LAT ? -LAT : x > LAT ? LAT : x; }
+  function isV12() { return !!(MP.gen && MP.gen.VERSION >= 12); }
+  function seedRng(seed) {
+    if (MP.gen && typeof MP.gen.rng === 'function') { try { return MP.gen.rng(seed); } catch (e) { /* fall through */ } }
+    var a = 0, i;
+    seed = String(seed);
+    for (i = 0; i < seed.length; i++) a = (Math.imul(a, 31) + seed.charCodeAt(i)) | 0;
+    return function () {
+      a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  // The song of a segment comes from the run seed, so a Daily Run plays the same songs for everyone.
+  function pickSong(seg) {
+    var S = MP.songs, s = null;
+    if (S && typeof S.pick === 'function') { try { s = S.pick(seg, W.songRng, W.songId || undefined); } catch (e) { s = null; } }
+    return s && s.id != null ? s.id : '';
+  }
+  // The menu demo plays a little further into the difficulty curve so it shows sliding and taffy paths.
+  function demoOpts() { return { offset: isV12() ? DEMO_OFFSET : 0, tutorial: false, slideLesson: false }; }
 
   G.dateKey = dateKey;
   G.getData = function () { return data; };
@@ -53,6 +82,7 @@
     if (data.dailySeed !== dateKey()) { data.dailySeed = dateKey(); data.dailyBest = 0; data.dailyBestGates = 0; }
     if (!data.feats) data.feats = {};
     if (!data.recent) data.recent = [];
+    data.slideOk = !!data.slideOk;
     try {
       var cur = MP.skins && MP.skins.get && MP.skins.get(data.skin);
       if (cur && MP.audio && MP.audio.setPopNote) MP.audio.setPopNote(cur.popNote);
@@ -66,9 +96,12 @@
     var bg0 = bgAt(0);
     var prevBest = o.demo ? 0 : (o.daily ? data.dailyBest : data.best) || 0;
     var bestGates = o.demo ? 0 : (o.daily ? data.dailyBestGates : data.bestGates) || 0;
+    var gopts = o.demo ? demoOpts() : { offset: o.offset || 0, tutorial: !!o.tutorial, slideLesson: !!o.slideLesson };
     W = {
-      demo: !!o.demo, daily: !!o.daily, seed: seed, tutorial: !!o.tutorial, offset: o.offset || 0,
-      gen: MP.gen.create(seed, { offset: o.offset || 0, tutorial: !!o.tutorial }), gates: [], ni: 0, genN: 0, lastP: 0,
+      demo: !!o.demo, daily: !!o.daily, seed: seed, tutorial: !!o.tutorial, offset: gopts.offset, slideLesson: !!gopts.slideLesson,
+      gen: MP.gen.create(seed, gopts), gates: [], ni: 0, genN: 0, lastP: 0, lastBeat: 0, beatOff: 0,
+      lx: 0, lxGo: null, sdv: 0, steer: 0, bpm: 120, beatF: 0, seg: 0, songId: '', songRng: seedRng(seed + ':songs'),
+      tickN: 0, tickT: 9, holdK: 0, scrape: 0, ghostX: 0, slid: 0,
       pos: 0, speed: 7, vel: 7, simT: 0, runT: 0, puffT: 0, own: false, held: false, cd: 0, pend: -1, lastTap: -9, puffEnd: -9, evs: [], invT: 0,
       pop: 1, popV: 0, phase: 0, hitT: 0, dOff: 0, deadT: 0, rot: 0, shake: 0, shakeAmp: 6, hitStop: 0,
       parts: [], texts: [], rings: [], streak: 0, maxStreak: 0, maxMult: 1,
@@ -81,21 +114,72 @@
     };
     acc = 0;
     fill();
+    if (W.gates[0]) { W.bpm = W.gates[0].bpm; W.seg = W.gates[0].seg; }
+    W.songId = pickSong(W.seg);
     return W;
   }
 
   function fill() {
     var w = W, limit = w.pos + 26;
     while (w.lastP < limit) {
-      if (w.demo && w.genN >= 16) { w.gen = MP.gen.create(String(Math.random())); w.genN = 0; }
+      if (w.demo && w.genN >= 16) {
+        // the demo loops short stretches; the next one starts on a bar line so the beat clock stays continuous
+        w.gen = MP.gen.create(String(Math.random()), demoOpts()); w.genN = 0;
+        w.beatOff = Math.ceil(w.lastBeat / 4 - 1e-6) * 4;
+      }
       var nx = w.gen.next();
       w.genN++;
-      var sp = nx.spd;
-      var p = w.lastP + nx.gapBefore * sp, pe = p + nx.len * sp;
-      w.gates.push({ n: nx.n, type: nx.type, p: p, pe: pe, lp: p - nx.lolli * sp, lolli: nx.lolli, len: nx.len, tut: nx.tut, state: 0, ok: false, t: 0, got: false, perf: false, spd: sp });
-      w.lastP = pe;
+      // Positions follow the beat grid: one beat = spd * 60 / bpm units inside a segment.
+      var sp = nx.spd, bpm = nx.bpm > 0 ? nx.bpm : 120, upb = sp * 60 / bpm;
+      var gapB = nx.beats != null ? nx.beats : nx.gapBefore * bpm / 60;
+      var beat = nx.beat != null ? w.beatOff + nx.beat : w.lastBeat + gapB;
+      if (!(beat - w.lastBeat > 0.2)) beat = w.lastBeat + Math.max(0.5, gapB);
+      var lenB = nx.type !== 'taffy' ? 0 : nx.lenBeats != null ? nx.lenBeats : nx.len * bpm / 60;
+      var lolli = nx.lolli || 0, lolliU = nx.lolliBeats ? nx.lolliBeats * upb : lolli * sp;
+      var p = w.lastP + (beat - w.lastBeat) * upb, pe = p + lenB * upb, path = null, i;
+      if (nx.type === 'taffy' && nx.path && nx.path.length) {
+        path = [];
+        for (i = 0; i < nx.path.length; i++) path.push({ p: p + nx.path[i].b * upb, x: clampLat(+nx.path[i].x || 0) });
+      }
+      w.gates.push({
+        n: nx.n, type: nx.type, p: p, pe: pe, lp: p - lolliU, lolli: lolli, len: nx.len || 0, lenBeats: lenB, tut: !!nx.tut,
+        tutKind: nx.tut ? (nx.tutKind || (nx.type === 'hole' ? (lolli ? 'lolli' : 'hole') : nx.type)) : '',
+        x: clampLat(+nx.x || 0), beat: beat, bpm: bpm, seg: nx.seg != null ? nx.seg : Math.floor((nx.n - 1) / SEG_GATES),
+        path: path, scraped: false, off: false, tk: 0,
+        state: 0, ok: false, t: 0, got: false, perf: false, spd: sp
+      });
+      w.lastP = pe; w.lastBeat = beat + lenB;
     }
   }
+
+  // Lateral centre of a taffy path at world position pos (null before its first waypoint).
+  function pathAt(g, pos) {
+    var pa = g && g.path, i, a, b;
+    if (!pa || !pa.length || pos < pa[0].p) return null;
+    for (i = 1; i < pa.length; i++) {
+      if (pos < pa[i].p) { a = pa[i - 1]; b = pa[i]; return a.x + (b.x - a.x) * (pos - a.p) / Math.max(1e-6, b.p - a.p); }
+    }
+    return pa[pa.length - 1].x;
+  }
+  G.pathAt = pathAt;
+  // Where the mallow has to be next: the x of the next hole, or the first waypoint of the next taffy path.
+  function aheadX(from) {
+    var w = W, i, g;
+    for (i = from; i < w.gates.length && i < from + 5; i++) {
+      g = w.gates[i];
+      if (g.type === 'hole') return g.x;
+      if (g.type === 'taffy' && g.path) return g.path[0].x;
+    }
+    return null;
+  }
+  // logical lateral position: a nudge (soft gate, revive) counts as already there
+  function latNow() { return W.lxGo != null ? W.lxGo : W.lx; }
+  function nudgeTo(x) { if (x != null && Math.abs(x - W.lx) > 0.02) W.lxGo = clampLat(x); }
+  function inTaffy() {
+    var g = W.gates[W.ni];
+    return !!g && g.type === 'taffy' && g.state === 4;
+  }
+  function leaveTaffy() { W.tickN = 0; W.tickT = 9; }
 
   // ---- run lifecycle ----
   G.startRun = function (opts) {
@@ -120,10 +204,11 @@
   function beginRun(daily) {
     var seed = daily ? 'daily-' + dateKey() : undefined;
     var tut = !daily && ((data.runs || 0) < 2 || (data.bestGates || 0) < 12);
-    newWorld({ daily: daily, seed: seed, tutorial: tut, offset: tut ? 0 : startOffset(daily) });
+    // the slide lesson changes the map, so the Daily Run (same map for everyone) never has it
+    newWorld({ daily: daily, seed: seed, tutorial: tut, offset: tut ? 0 : startOffset(daily), slideLesson: !daily && !data.slideOk });
     st.mode = 'run'; st.score = 0; st.gates = 0; st.combo = 0; st.mult = 1; st.alive = true;
     st.running = false; st.paused = false; st.daily = daily;
-    aud('setLayer', 0); aud('setRush', false);
+    aud('setSong', W.songId); aud('setLayer', 0); aud('setRush', false);
     ui('showScreen', null);
     ui('setPlaying', true);
   }
@@ -141,7 +226,7 @@
   G.pause = function () {
     if (st.mode !== 'run' || st.paused || !W || W.demo) return;
     st.paused = true;
-    W.evs.length = 0; W.held = false; W.own = false;
+    W.evs.length = 0; W.held = false; W.own = false; W.sdv = 0;
     sdk('gameplayStop');
     if (musicOn) { musicOn = false; if (MP.audio && MP.audio.stopMusic) MP.audio.stopMusic(); }
     ui('showScreen', 'pause');
@@ -179,12 +264,16 @@
     var w = W, g = w.failGate;
     w.revived = true; w.dead = false; w.invT = 1.5; w.dOff = 0; w.hitT = 0; w.rot = 0; w.uiShown = false;
     w.tip = ''; w.ghost = 0; w.puffT = 0; w.cd = 0; w.own = false; w.held = false; w.snap = null;
+    w.sdv = 0; w.tickN = 0; w.tickT = 9; w.scrape = 0; w.pend = -1;
     if (g) {
       if (g.type === 'hole') g.state = 1; else { g.state = 2; g.t = 0; burst(24, false); }
       st.gates++;
       w.ni = w.gates.indexOf(g) + 1;
       w.failGate = null;
     }
+    // line the mallow up with whatever comes next (it cannot slide while small)
+    var ax = aheadX(w.ni);
+    nudgeTo(ax != null ? ax : g && g.type !== 'wall' ? g.x : null);
     st.mode = 'run'; st.alive = true; st.running = false; st.paused = false;
     w.evs.length = 0;
     ui('showScreen', null);
@@ -219,6 +308,19 @@
     W.evs.push({ t: evTime(evMs), d: 0 });
   };
 
+  // Slide sideways. Only a puffed mallow moves: tap-and-drag = puff + slide. dv is in world units.
+  G.steer = function (dv) {
+    var w = W;
+    if (!w || w.demo || st.mode !== 'run' || st.paused || w.dead || !st.running) return;
+    if (typeof dv !== 'number' || !isFinite(dv)) return;
+    w.sdv = Math.max(-2 * LAT, Math.min(2 * LAT, w.sdv + dv));
+  };
+  // Keyboard: held direction -1 | 0 | 1, applied at STEER_KEY units per second while puffed.
+  G.steerDir = function (dir) {
+    steerDir = dir > 0 ? 1 : dir < 0 ? -1 : 0;
+    if (W) W.steer = steerDir;
+  };
+
   function canPuff() { return W.puffT <= 0 && W.cd <= 0; }
 
   function doDown(t) {
@@ -238,7 +340,7 @@
     w.popV += 14;
     aud('puff');
     if (MP.headless) return;
-    var p = MP.render.toScreen(0, 0);
+    var p = here();
     w.rings.push({ x: p.x, y: p.y, r: 0.5, life: 0.3, max: 0.3, col: 'rgba(255,255,255,0.9)', grow: 3.5 });
   }
 
@@ -249,17 +351,27 @@
     if (!w) return;
     w.t += dt;
     if (st.paused) return;
-    if (w.hitStop > 0) { w.hitStop -= dt; return; }
+    if (w.hitStop > 0) { w.hitStop -= dt; musicTick(); return; }
     acc += Math.min(dt, 0.05);
     var n = 0;
     while (acc >= DT && n < 12) { step(); acc -= DT; n++; if (w.hitStop > 0) { break; } }
     if (acc > DT * 12) acc = 0;
     G.alpha = acc / DT;
+    musicTick();
     if (w.dead && !w.uiShown && w.deadT > (w.tip ? 1.0 : 0.5)) {
       w.uiShown = true;
       ui('showResult', w.result);
     }
   };
+
+  // The music follows the beat clock of the world (run or menu demo); no call = no notes, so pause is automatic.
+  function musicTick() {
+    var w = W, s = MP.audio;
+    if (!w || w.dead || !(w.demo || (st.mode === 'run' && st.running))) return;
+    if (s && typeof s.musicTick === 'function') {
+      try { s.musicTick(w.beatF, w.bpm * (w.rush > 0 ? C.RUSH_SPEED : 1)); } catch (e) { /* ignore */ }
+    }
+  }
 
   G.alpha = 0;
   G.step = function () { step(); };
@@ -271,9 +383,24 @@
       e = w.evs.shift();
       if (e.d) doDown(e.t); else { w.held = false; w.own = false; }
     }
+    // lateral: a nudge glides on its own; otherwise drag and keys move the mallow, but only while it is puffed
+    w.steer = steerDir;
+    if (w.lxGo != null) {
+      var gd = w.lxGo - w.lx, gm = GLIDE * DT;
+      if (Math.abs(gd) <= gm) { w.lx = w.lxGo; w.lxGo = null; } else w.lx += gd > 0 ? gm : -gm;
+      w.sdv = 0;
+    } else if (w.puffT > 0 && !w.demo && !w.dead && st.mode === 'run' && st.running) {
+      var sd = w.sdv + w.steer * STEER_KEY * DT;
+      if (sd) { var lx0 = w.lx; w.lx = clampLat(w.lx + sd); w.slid += Math.abs(w.lx - lx0); }
+      w.sdv = 0;
+    } else w.sdv = 0;
+    w.tickT += DT;
+    if (w.scrape > 0) w.scrape -= DT;
+    if (!w.tickN && w.holdK > 0) w.holdK = Math.max(0, w.holdK - DT * 3);
     if (w.puffT > 0) {
       w.puffT += DT;
-      if ((w.puffT >= C.PUFF_MIN && !w.own) || w.puffT >= C.PUFF_MAX) { w.puffT = 0; w.own = false; w.cd = C.COOLDOWN; w.puffEnd = w.simT; }
+      // PUFF_MAX is suspended inside taffy
+      if ((w.puffT >= C.PUFF_MIN && !w.own) || (w.puffT >= C.PUFF_MAX && !inTaffy())) { w.puffT = 0; w.own = false; w.cd = C.COOLDOWN; w.puffEnd = w.simT; }
     } else if (w.cd > 0) {
       w.cd = Math.max(0, w.cd - DT);
     }
@@ -305,26 +432,24 @@
   function advance() {
     var w = W, i, g;
     var ng = w.gates[w.ni];
-    if (ng) w.speed = ng.spd;
+    if (ng) {
+      w.speed = ng.spd; w.bpm = ng.bpm;
+      if (ng.seg !== w.seg) enterSeg(ng.seg);
+    }
     var v = w.vel = w.speed * (w.rush > 0 ? C.RUSH_SPEED : 1);
     w.pos += v * DT;
     w.runT += DT;
     w.phase += v * DT * 1.7;
+    // beat clock: read from the position relative to the next gate, so the music can never drift from the gates
+    if (ng) w.beatF = ng.beat + (w.pos - ng.p) * ng.bpm / (60 * ng.spd);
     fill();
     while (w.gates.length > 2 && w.ni > 1 && w.gates[0].pe < w.pos - 7) { w.gates.shift(); w.ni--; }
-    // demo bot: puffs 0.1s before each wall and holds through taffy
-    if (w.demo) {
-      g = w.gates[w.ni];
-      if (g && g.type !== 'hole') {
-        if (g.state === 0 && (g.p - w.pos) / v <= 0.1 && canPuff()) { w.held = g.type === 'taffy'; doPuff(w.simT); }
-        if (g.state === 4 && g.pe - w.pos <= 0.02 * v) { w.held = false; w.own = false; }
-      }
-    }
-    var puffed = w.puffT > 0;
-    // lollipops sit just before a hole: puff to grab, then shrink in time
+    if (w.demo) demoBot(v);
+    var puffed = w.puffT > 0, lx = latNow();
+    // lollipops sit just before a hole, at the hole's x: puff to grab, then shrink in time
     for (i = w.ni; i < w.gates.length && i < w.ni + 3; i++) {
       g = w.gates[i];
-      if (g.lolli && !g.got && puffed && Math.abs(w.pos - g.lp) <= 0.05 * v) collectLolli(g);
+      if (g.lolli && !g.got && puffed && Math.abs(w.pos - g.lp) <= 0.05 * v && Math.abs(lx - g.x) <= HOLE_TOL + 0.25) collectLolli(g);
     }
     var win = GRACE * v, dist;
     while ((g = w.gates[w.ni])) {
@@ -342,12 +467,17 @@
         var de = g.pe - w.pos;
         if (de <= win) { clearTaffy(g, de); w.ni++; continue; }
         if (!puffed) { fail(g, 'taffy'); if (w.dead) return; w.ni++; continue; }
+        if (g.path && !followPath(g)) { fail(g, 'path'); if (w.dead) return; w.ni++; continue; }
+        // hold ticks on the half-beat grid, counted from the start of the taffy
+        var ti = Math.floor((w.beatF - g.beat) / TICK_BEATS + 1e-6);
+        if (ti > g.tk) { g.tk = ti; holdTick(); }
         break;
       } else {
         if (dist > win) break;
-        if (!puffed) g.ok = true;
+        // a hole needs a small mallow lined up with it; a small mallow cannot slide, so a miss by position is final
+        if (!puffed && !g.ok) { if (Math.abs(lx - g.x) <= HOLE_TOL) { g.ok = true; g.off = false; } else g.off = true; }
         if (g.ok && dist <= 0) { passGate(g); w.ni++; continue; }
-        if (dist < -win) { fail(g, 'hole'); if (w.dead) return; w.ni++; continue; }
+        if ((g.off && dist <= 0) || dist < -win) { fail(g, g.off ? 'side' : 'hole'); if (w.dead) return; w.ni++; continue; }
         break;
       }
     }
@@ -357,9 +487,94 @@
     }
   }
 
+  // Inside taffy, from the first waypoint on: false = too far from the path (fail); between TOL and FAIL = scrape.
+  function followPath(g) {
+    var w = W, px = pathAt(g, w.pos);
+    if (px == null) return true;
+    var d = Math.abs(latNow() - px);
+    if (d > TAFFY_FAIL) return false;
+    if (d > TAFFY_TOL) {
+      if (!g.scraped) {
+        g.scraped = true; w.scrape = 0.35;
+        aud('scrape');
+        if (!w.demo) { w.shake = 0.1; w.shakeAmp = 3; }
+        sparks(8, '#ffffff');
+      } else if (w.scrape < 0.12) w.scrape = 0.12;
+    }
+    return true;
+  }
+
+  function holdTick() {
+    var w = W;
+    w.tickN++; w.tickT = 0;
+    w.holdK = Math.min(1, w.tickN / 6);
+    if (!w.demo) { st.score += pts(1, true); w.scoreAnim = 0.12; }
+    aud('holdTick', w.tickN);
+    if (MP.headless) return;
+    if (!w.demo) { w.shake = 0.07; w.shakeAmp = 2 + 3 * w.holdK; }
+    sparks(5 + Math.round(5 * w.holdK), null);
+    var p = here();
+    w.rings.push({ x: p.x, y: p.y, r: 0.6, life: 0.22, max: 0.22, col: 'rgba(127,224,255,0.9)', grow: 4 + 3 * w.holdK });
+  }
+
+  // small spray thrown back from the mallow
+  function sparks(count, col) {
+    if (MP.headless) return;
+    var R = MP.render, S = R.layout.S, p = here();
+    for (var i = 0; i < count; i++) {
+      var vel = R.vec(rnd(-9, -2), rnd(-4, 4));
+      addPart(p.x, p.y, vel.x * S, vel.y * S, rnd(0.3, 0.6), rnd(0.07, 0.14) * S, col || CANDY[(Math.random() * CANDY.length) | 0], 1, 0.3);
+    }
+  }
+
+  // New segment: next song, and the zone (banner, backdrop, music layer) follows it.
+  function enterSeg(seg) {
+    var w = W;
+    w.seg = seg;
+    w.songId = pickSong(seg);
+    if (w.demo) return;
+    aud('setSong', w.songId);
+    var z = 0;
+    while (z + 1 < ZONES.length && seg * SEG_GATES >= ZONES[z + 1][0]) z++;
+    if (z === w.zone) return;
+    w.zone = z;
+    w.bgFrom = lerpBg(); w.bgIdx = z; w.bgTo = bgAt(z); w.bgT = 0;
+    w.banner = { s: ZONES[z][1], sub: 'Zone ' + (z + 1), t: 2, max: 2 };
+    aud('chime'); aud('setLayer', z);
+    if (z >= 1) feat('zone1');
+    if (z >= 2) feat('zone2');
+    if (z >= 4) feat('zone4');
+  }
+
+  // Menu demo bot: puffs just before walls, holds through taffy along its path, grabs lollipops and slides to line up.
+  function demoBot(v) {
+    var w = W, g = w.gates[w.ni], puffed = w.puffT > 0, tx, tt, off, mv = STEER_KEY * 1.4 * DT;
+    if (!g) return;
+    if (g.type === 'taffy' && g.state === 4 && g.path) {
+      tx = pathAt(g, w.pos + 0.12 * v);
+      if (tx == null) tx = g.path[0].x;
+    } else tx = aheadX(w.ni);
+    if (puffed && tx != null && w.lxGo == null) w.lx = clampLat(w.lx + Math.max(-mv, Math.min(mv, (tx - w.lx) * 0.2)));
+    off = tx != null && Math.abs(tx - w.lx) > 0.08;
+    if (g.type !== 'hole') {
+      if (g.state === 0) {
+        if ((g.p - w.pos) / v <= 0.1 && canPuff()) { w.held = true; doPuff(w.simT); }
+        else if (puffed && w.own && w.puffT >= C.PUFF_MIN && (!off || w.puffT > 0.9)) { w.held = false; w.own = false; }
+      } else if (g.state === 4 && g.pe - w.pos <= 0.02 * v) { w.held = false; w.own = false; }
+      return;
+    }
+    tt = (g.p - w.pos) / v;
+    if (puffed) {
+      var wantLolli = g.lolli && !g.got && w.pos < g.lp;
+      if (w.own && ((!off && !wantLolli) || tt <= GRACE + 0.06)) { w.held = false; w.own = false; }
+    } else if (canPuff() && tt > C.PUFF_MIN + GRACE + 0.03) {
+      if (g.lolli && !g.got && w.pos < g.lp ? (g.lp - w.pos) / v <= (off ? 0.14 : 0.04) : (off && tt <= 0.6)) { w.held = true; doPuff(w.simT); }
+    }
+  }
+
   // ---- scoring ----
   function pts(n, flat) { return n * (flat ? 1 : st.mult) * (W.rush > 0 ? 2 : 1); }
-  function here() { return MP.render.toScreen(0, 0); }
+  function here() { return MP.render.toScreen(0, W ? W.lx : 0); }
   function unit() { return MP.render.layout.S; }
 
   function feat(id) {
@@ -433,17 +648,6 @@
         feat('rush');
       }
     }
-    var z = w.zone;
-    while (z + 1 < ZONES.length && st.gates >= ZONES[z + 1][0]) z++;
-    if (z !== w.zone) {
-      w.zone = z;
-      w.bgFrom = lerpBg(); w.bgIdx = z; w.bgTo = bgAt(z); w.bgT = 0;
-      w.banner = { s: ZONES[z][1], sub: 'Zone ' + (z + 1), t: 2, max: 2 };
-      aud('chime'); aud('setLayer', z);
-      if (z >= 1) feat('zone1');
-      if (z >= 2) feat('zone2');
-      if (z >= 4) feat('zone4');
-    }
     if (st.gates >= 20) feat('gates20');
     if (w.flagN && !w.far && st.gates >= w.flagN) {
       w.far = true;
@@ -483,6 +687,8 @@
     gateCounted(false);
     w.scoreAnim = 0.15;
     aud('pip');
+    // the slide lesson is learnt once the player has slid this run and passes an offset hole
+    if (!w.demo && !data.slideOk && w.slid >= 0.3 && Math.abs(g.x) > 0.05) { data.slideOk = true; persist(); }
     if (MP.headless) return;
     var p = here(), S = unit();
     for (var i = 0; i < 5; i++) addPart(p.x, p.y, rnd(-3, 3) * S, rnd(-3, 3) * S, 0.4, 0.07 * S, '#ffffff', 1, 0);
@@ -518,7 +724,8 @@
 
   function enterTaffy(g, dist) {
     var w = W;
-    g.state = 4; g.perf = isPerfect(dist);
+    g.state = 4; g.perf = isPerfect(dist); g.tk = 0; g.scraped = false;
+    w.tickN = 0;
     aud('smash', w.streak);
     if (!w.demo) { w.shake = 0.08; w.shakeAmp = 4; }
     burst(14, false);
@@ -528,8 +735,13 @@
     var w = W;
     g.state = 2; g.t = 0;
     w.taffyC++;
+    leaveTaffy();
+    aud('holdEnd', !g.scraped);
+    // PUFF_MAX counts again from here: leave room to let go, but an idle hold must not last forever
+    if (w.puffT > C.PUFF_MAX - 0.4) w.puffT = C.PUFF_MAX - 0.4;
     if (w.snap) endSnap(false);
-    w.snap = { perf: g.perf, tExit: w.simT + de / w.vel };
+    // SNAP needs a clean hold: perfect entry and the path never scraped
+    w.snap = { perf: g.perf && !g.scraped, tExit: w.simT + de / w.vel };
     if (w.puffT <= 0) endSnap(true);
   }
 
@@ -560,12 +772,12 @@
     var R = MP.render, S = R.layout.S, ext = Math.min(R.layout.ext, 5);
     for (var i = 0; i < count; i++) {
       var v = rnd(-ext, ext);
-      var pt = R.toScreen(0.2, v);
+      var pt = R.toScreen(0.2, W.lx + v);
       var vel = R.vec(rnd(-1, 9), v * 1.1 + rnd(-3, 3));
       var life = rnd(0.7, 1.3);
       addPart(pt.x, pt.y, vel.x * S * (big ? 1 : 0.7), vel.y * S * (big ? 1 : 0.7) - S * 2, life, rnd(0.1, 0.22) * S, CANDY[(Math.random() * CANDY.length) | 0], 0, 1);
     }
-    var c = R.toScreen(0, 0);
+    var c = here();
     W.rings.push({ x: c.x, y: c.y, r: 0.7, life: 0.35, max: 0.35, col: 'rgba(255,255,255,0.95)', grow: 6 });
   }
 
@@ -587,14 +799,17 @@
 
   function fail(g, cause) {
     var w = W;
+    if (g.type === 'taffy') leaveTaffy();
     if (w.demo || w.invT > 0) {
       if (g.type === 'hole') g.state = 1; else { g.state = 2; g.t = 0; burst(20, false); }
+      if (g.type !== 'wall') nudgeTo(g.x);
       return;
     }
     if (cause === 'wall' && w.simT - w.puffEnd < 0.45 && w.puffEnd > w.lastTap) cause = 'early';
     if (g.tut) {
-      // first gate of each kind in the lesson run only bumps
+      // first gate of each kind in the lesson run only bumps (the slide lesson also nudges the mallow into line)
       if (g.type === 'hole') g.state = 1; else { g.state = 2; g.t = 0; }
+      if (g.type !== 'wall') nudgeTo(g.x);
       w.hint = true; w.hitT = 0.5; w.shake = 0.2; w.shakeAmp = 8;
       streakBreak();
       aud('boing');
@@ -611,7 +826,11 @@
     if (w.snap) endSnap(false);
     g.state = 3;
     w.failGate = g; w.dead = true; w.deadT = 0; w.hitT = 9;
-    w.cause = cause; w.ghost = cause === 'hole' ? 1 : 2;
+    // ghost = what would have worked: small (1) or puffed (2), drawn at lateral w.ghostX
+    w.cause = cause; w.ghost = cause === 'hole' || cause === 'side' ? 1 : 2;
+    w.ghostX = cause === 'side' ? g.x : w.lx;
+    if (cause === 'path') { var gx = pathAt(g, w.pos); if (gx != null) w.ghostX = gx; }
+    w.sdv = 0; w.lxGo = null;
     w.tip = '';
     if ((tipSeen[cause] || 0) < 2) { tipSeen[cause] = (tipSeen[cause] || 0) + 1; w.tip = TIPS[cause]; }
     w.streak = 0; st.mult = 1; st.combo = 0; st.alive = false; st.mode = 'dead'; st.running = false;

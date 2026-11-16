@@ -92,7 +92,8 @@
       dailySeed: t, dailyBest: 0,
       goals: { date: t, list: makeGoals(t) },
       stickers: 0, mute: false, runs: 0,
-      sv: 1, bestGates: 0, dailyBestGates: 0, recent: [], feats: {}, freeRev: '', shortRuns: 0
+      sv: 1, bestGates: 0, dailyBestGates: 0, recent: [], feats: {}, freeRev: '', shortRuns: 0,
+      slideOk: false          // v1.2: passed an offset hole (ends the slide lesson)
     };
   }
 

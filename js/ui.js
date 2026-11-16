@@ -1,7 +1,7 @@
 (function () {
   var MP = window.MP = window.MP || {};
   var U = MP.ui = {};
-  var G, cur = null, back = 'menu', toastTimer = 0, savedWarned = false, pendingUnlocks = null, countTimer = 0, armed = false;
+  var G, cur = null, back = 'menu', toastTimer = 0, savedWarned = false, pendingUnlocks = null, countTimer = 0, armed = false, unlockTimer = 0;
 
   function $(id) { return document.getElementById(id); }
   function show(el, on) { el.classList.toggle('hidden', !on); }
@@ -100,6 +100,7 @@
   U.showScreen = function (name) {
     ['menu', 'result', 'pause', 'skins', 'goals'].forEach(function (s) { show($(s), s === name); });
     cur = name;
+    clearTimeout(unlockTimer);
     clearTimeout(toastTimer); show($('toast'), false);
     if (name === 'menu') { back = 'menu'; menuInfo(); }
     if (name === 'skins') buildSkins();
@@ -164,26 +165,52 @@
     var gc = $('resGoal'), ng = r.goals ? r.goals.length : 0;
     gc.textContent = '\u2605 Goal done! +' + ng;
     show(gc, ng > 0);
-    if (pendingUnlocks) setTimeout(nextUnlock, 700);
+    if (pendingUnlocks) unlockTimer = setTimeout(openUnlock, 700);
   };
 
   // Space / Enter on the result screen = Retry (keyboard players never have to reach for the mouse)
   U.retryKey = function () {
     if (cur !== 'result' || G.state.mode !== 'dead') return false;
-    if (!$('unlock').classList.contains('hidden')) { show($('unlock'), false); setTimeout(nextUnlock, 200); return true; }
+    if (!$('unlock').classList.contains('hidden')) { closeUnlock(); return true; }
     if (armed) G.startRun({ daily: G.state.daily });
     return true;
   };
 
-  function nextUnlock() {
-    if (!pendingUnlocks || !pendingUnlocks.length || cur !== 'result') return;
-    var s = pendingUnlocks.shift();
-    drawSkin($('unlockCv'), s.id, 0.8, false);
-    $('unlockName').textContent = s.name;
-    show($('unlock'), true);
+  // one popup for every skin unlocked by this result
+  function openUnlock() {
+    var list = pendingUnlocks;
+    pendingUnlocks = null;
+    if (!list || !list.length || cur !== 'result') return;
+    var multi = list.length > 1, box = $('unlock'), grid = $('unlockGrid');
+    box.classList.toggle('multi', multi);
+    $('unlockTitle').textContent = multi ? 'New friends!' : 'New friend!';
+    show($('unlockCv'), !multi); show($('unlockName'), !multi);
+    show(grid, multi); show($('unlockBtnTxt'), multi);
+    $('btnUnlockOk').setAttribute('aria-label', multi ? 'Claim all' : 'OK');
+    grid.innerHTML = '';
+    if (multi) {
+      list.forEach(function (s) {
+        var card = document.createElement('div');
+        card.className = 'ucard';
+        var cv = document.createElement('canvas'); cv.width = 96; cv.height = 96;
+        card.appendChild(cv);
+        var nm = document.createElement('div');
+        nm.textContent = s.name;
+        card.appendChild(nm);
+        grid.appendChild(card);
+        drawSkin(cv, s.id, 0.78, false);
+      });
+      grid.scrollTop = 0;
+    } else {
+      drawSkin($('unlockCv'), list[0].id, 0.8, false);
+      $('unlockName').textContent = list[0].name;
+    }
+    show(box, true);
     if (MP.audio && MP.audio.unlockJingle) MP.audio.unlockJingle();
     G.confetti();
   }
+
+  function closeUnlock() { pendingUnlocks = null; show($('unlock'), false); }
 
   U.reviveFailed = function () { show($('btnRevive'), false); };
 
@@ -204,7 +231,7 @@
     press('btnResume', function () { G.resume(); });
     press('btnPauseHome', function () { G.toMenu(); });
     press('btnPause', function () { G.pause(); });
-    press('btnUnlockOk', function () { show($('unlock'), false); setTimeout(nextUnlock, 200); });
+    press('btnUnlockOk', closeUnlock);
     press('btnMute', function () {
       var m = MP.audio && MP.audio.isMuted ? !MP.audio.isMuted() : false;
       if (MP.audio && MP.audio.setMuted) MP.audio.setMuted(m);

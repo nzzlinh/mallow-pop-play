@@ -68,13 +68,14 @@
   </section>
 
   <section id="unlock" class="screen modal hidden">
-    <div class="panel"><div class="ptitle">New friend!</div><canvas id="unlockCv" width="240" height="240"></canvas><div id="unlockName" class="uname"></div></div>
-    <button id="btnUnlockOk" class="btn mid okb" aria-label="OK"><svg viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <div class="panel"><div id="unlockTitle" class="ptitle">New friend!</div><canvas id="unlockCv" width="240" height="240"></canvas><div id="unlockName" class="uname"></div><div id="unlockGrid" class="ugrid hidden"></div></div>
+    <button id="btnUnlockOk" class="btn mid okb" aria-label="Claim"><svg viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5" fill="none" stroke="currentColor" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="unlockBtnTxt" class="hidden">Claim all</span></button>
   </section>
 </div>
 <script src="js/sdk.js"></script>
 <script src="js/save.js"></script>
 <script src="js/audio.js"></script>
+<script src="js/songs.js"></script>
 <script src="js/skins.js"></script>
 <script src="js/gen.js"></script>
 <script src="js/render.js"></script>
