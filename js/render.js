@@ -139,6 +139,40 @@
 
   function mod(a, b) { return ((a % b) + b) % b; }
 
+  // ---- candy road: its centre bends smoothly through the gaps (holes, taffy paths) as a hint where to slide ----
+  var laneP = [], laneX = [], laneLin = [], laneN = 0;
+  function laneBuild(w) {
+    laneN = 0;
+    var gs = w.gates || [], k, j, g, x;
+    function add(p, x, lin) {
+      if (laneN && p <= laneP[laneN - 1] + 1e-6) { laneX[laneN - 1] = x; laneLin[laneN - 1] = lin; return; }
+      laneP[laneN] = p; laneX[laneN] = x; laneLin[laneN] = lin; laneN++;
+    }
+    for (k = 0; k < gs.length; k++) {
+      g = gs[k];
+      if (g.type === 'hole') { x = gx(g); add(g.p - 0.45, x, false); add(g.p + 0.45, x, false); }
+      else if (g.type === 'taffy') {
+        if (hasPath(g)) {
+          add(g.p, num(g.path[0].x, 0), false);
+          for (j = 0; j < g.path.length; j++) add(num(g.path[j].p, g.p), num(g.path[j].x, 0), true);
+          add(g.pe, num(g.path[g.path.length - 1].x, 0), true);
+        } else { x = gx(g); add(g.p, x, false); add(g.pe, x, false); }
+      }
+    }
+  }
+  // lane centre at world position p: linear inside taffy paths, smooth (ease in/out) elsewhere
+  function laneAt(p) {
+    if (!laneN) return 0;
+    if (p <= laneP[0]) return laneX[0];
+    if (p >= laneP[laneN - 1]) return laneX[laneN - 1];
+    var lo = 0, hi = laneN - 1;
+    while (hi - lo > 1) { var m = (lo + hi) >> 1; if (laneP[m] <= p) lo = m; else hi = m; }
+    var f = (p - laneP[lo]) / (laneP[hi] - laneP[lo] || 1);
+    if (!laneLin[hi]) f = f * f * (3 - 2 * f);
+    return laneX[lo] + (laneX[hi] - laneX[lo]) * f;
+  }
+  R.laneAt = function (w, p) { laneBuild(w); return laneAt(p); };
+
   // ---- world pieces (drawn in the track frame: x = distance ahead, y = across) ----
   function drawDecor(pos, speed, w, bp) {
     var span = L.ahead + L.back + 8, k, d, u;
@@ -151,14 +185,29 @@
       ctx.fill();
     }
     // lane (pulses on the beat)
-    var lo = -L.back - 1, hi = L.ahead + 1;
+    var lo = -L.back - 1, hi = L.ahead + 1, STEP = 0.3, n = Math.ceil((hi - lo) / STEP), i, v;
+    laneBuild(w);
+    // band
     ctx.fillStyle = 'rgba(255,255,255,' + (0.34 + 0.2 * bp) + ')';
-    ctx.fillRect(lo, -0.75, hi - lo, 1.5);
-    ctx.fillStyle = 'rgba(255,255,255,' + (0.75 + 0.25 * bp) + ')';
-    var ew = 0.06 + 0.05 * bp;
-    ctx.fillRect(lo, -0.77 - ew / 2, hi - lo, ew); ctx.fillRect(lo, 0.77 - ew / 2, hi - lo, ew);
-    ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    for (u = mod(-pos, 1.8) + lo - 1.8; u < hi; u += 1.8) ctx.fillRect(u, -0.05, 0.7, 0.1);
+    ctx.beginPath();
+    for (i = 0; i <= n; i++) { u = lo + i * STEP; v = laneAt(pos + u); if (i) ctx.lineTo(u, v - 0.75); else ctx.moveTo(u, v - 0.75); }
+    for (i = n; i >= 0; i--) { u = lo + i * STEP; ctx.lineTo(u, laneAt(pos + u) + 0.75); }
+    ctx.closePath(); ctx.fill();
+    // edges
+    ctx.strokeStyle = 'rgba(255,255,255,' + (0.75 + 0.25 * bp) + ')';
+    ctx.lineWidth = 0.06 + 0.05 * bp; ctx.lineJoin = 'round'; ctx.lineCap = 'butt';
+    for (var sd = -1; sd <= 1; sd += 2) {
+      ctx.beginPath();
+      for (i = 0; i <= n; i++) { u = lo + i * STEP; v = laneAt(pos + u) + sd * 0.77; if (i) ctx.lineTo(u, v); else ctx.moveTo(u, v); }
+      ctx.stroke();
+    }
+    // centre dashes follow the curve
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 0.1; ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (u = mod(-pos, 1.8) + lo - 1.8; u < hi; u += 1.8) {
+      ctx.moveTo(u, laneAt(pos + u)); ctx.lineTo(u + 0.35, laneAt(pos + u + 0.35)); ctx.lineTo(u + 0.7, laneAt(pos + u + 0.7));
+    }
+    ctx.stroke(); ctx.lineCap = 'butt';
     // beat grid: soft ticks on the lane edges at every beat, a faint bar line every 4 beats
     var bf = num(w.beatF, -1), bpm = num(w.bpm, 0), sp = num(w.speed, 0) * 60 / (bpm || 1);
     if (bf >= 0 && bpm > 0 && sp > 0.4) {
@@ -170,7 +219,8 @@
           ctx.fillRect(u - 0.04, -e, 0.08, 2 * e);
         }
         ctx.fillStyle = 'rgba(255,255,255,0.85)';
-        ctx.beginPath(); ctx.arc(u, -1.05, 0.09, 0, 6.2832); ctx.arc(u, 1.05, 0.09, 0, 6.2832); ctx.fill();
+        v = laneAt(pos + u);
+        ctx.beginPath(); ctx.moveTo(u + 0.09, v - 1.05); ctx.arc(u, v - 1.05, 0.09, 0, 6.2832); ctx.moveTo(u + 0.09, v + 1.05); ctx.arc(u, v + 1.05, 0.09, 0, 6.2832); ctx.fill();
       }
     }
     var hk = clamp01(num(w.holdK, 0));
