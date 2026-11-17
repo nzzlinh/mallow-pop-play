@@ -17,6 +17,7 @@
   };
 
   R.resize = function () {
+    if (tcache) tcache.clear();
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth; H = window.innerHeight;
     cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
@@ -65,6 +66,16 @@
     ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r); ctx.closePath();
   }
 
+  // star sub-path added to the current path (for batching)
+  function addStar(x, y, ro, ri, n, rot) {
+    for (var k = 0; k < n * 2; k++) {
+      var r = k % 2 ? ri : ro, a = rot + k * Math.PI / n - Math.PI / 2;
+      if (k) ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); else ctx.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r);
+    }
+    ctx.closePath();
+  }
+  var cols = [];
+
   function starPath(x, y, ro, ri, n, rot) {
     ctx.beginPath();
     for (var k = 0; k < n * 2; k++) {
@@ -74,12 +85,42 @@
     ctx.closePath();
   }
 
+  // Outlined text is costly to rasterise every frame (strokeText), so each label is drawn once into a small
+  // canvas at a size bucket at least as large as asked, then blitted (and scaled down) with drawImage.
+  var tcache = typeof Map === 'function' ? new Map() : null, TC_MAX = 96;
+  function makeText(s, q, fill, stroke, lw) {
+    var c = document.createElement('canvas'), g = c.getContext('2d'), font = '900 ' + q + 'px ' + FONT;
+    g.font = font;
+    var tw = g.measureText(s).width, pad = (stroke ? lw / 2 : 0) + 2, cw = tw + pad * 2, ch = q * 1.35 + pad * 2;
+    c.width = Math.max(1, Math.ceil(cw * dpr)); c.height = Math.max(1, Math.ceil(ch * dpr));
+    g.scale(dpr, dpr);
+    g.font = font; g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+    if (stroke) { g.lineWidth = lw; g.strokeStyle = stroke; g.strokeText(s, cw / 2, ch / 2); }
+    g.fillStyle = fill; g.fillText(s, cw / 2, ch / 2);
+    return { c: c, w: cw, h: ch, pad: pad };
+  }
   function text(s, x, y, size, fill, stroke, lw, align) {
-    ctx.font = '900 ' + size + 'px ' + FONT;
-    ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
-    ctx.lineJoin = 'round';
-    if (stroke) { ctx.lineWidth = lw; ctx.strokeStyle = stroke; ctx.strokeText(s, x, y); }
-    ctx.fillStyle = fill; ctx.fillText(s, x, y);
+    if (!(size > 0)) return;
+    s = String(s);
+    if (!tcache || typeof document === 'undefined') {
+      ctx.font = '900 ' + size + 'px ' + FONT;
+      ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+      if (stroke) { ctx.lineWidth = lw; ctx.strokeStyle = stroke; ctx.strokeText(s, x, y); }
+      ctx.fillStyle = fill; ctx.fillText(s, x, y);
+      return;
+    }
+    var q = size <= 24 ? Math.ceil(size / 2) * 2 : Math.ceil(size / 6) * 6;
+    var lq = stroke ? (lw || 0) * q / size : 0;
+    var key = s + '|' + q + '|' + fill + '|' + (stroke || '') + '|' + Math.round(lq * 2);
+    var e = tcache.get(key);
+    if (!e) {
+      e = makeText(s, q, fill, stroke, lq);
+      if (tcache.size >= TC_MAX) tcache.delete(tcache.keys().next().value);
+      tcache.set(key, e);
+    }
+    var k = size / q, dw = e.w * k, dh = e.h * k;
+    var ox = align === 'left' ? -e.pad * k : align === 'right' ? -dw + e.pad * k : -dw / 2;
+    ctx.drawImage(e.c, x + ox, y - dh / 2, dw, dh);
   }
 
   // filled arrow head (screen space) at x,y pointing along (dx,dy)
@@ -379,6 +420,8 @@
 
   // glow, spin swooshes, tick rings and popcorn stars behind/around the mallow
   function drawHoldBack(w, p, size, h) {
+    var chg = clamp01(num(w.charge, 0));
+    if (chg > 0.03) drawSwirl(w, p, size, chg);
     if (h.hk < 0.02 && h.tp <= 0) return;
     var S = L.S, k, a;
     var r1 = size * (0.8 + 0.4 * h.hk + 0.3 * h.tp);
@@ -400,8 +443,52 @@
     }
   }
 
+  // two candy-cane spiral arms turning round the mallow, faster and wider with the charge
+  function drawSwirl(w, p, size, chg) {
+    var S = L.S, sw = num(w.swirlA, 0), arm, i, N = 14;
+    ctx.lineCap = 'round';
+    for (arm = 0; arm < 3; arm++) {
+      var base = sw + arm * 2.0944;
+      for (var pass = 0; pass < 2; pass++) {
+        ctx.beginPath();
+        for (i = 0; i <= N; i++) {
+          var f = i / N, a = base + f * (2.2 + 1.2 * chg), r = size * (0.5 + f * (0.55 + 0.6 * chg));
+          var x = p.x + Math.cos(a) * r, y = p.y + Math.sin(a) * r;
+          if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+        }
+        ctx.globalAlpha = 0.85 * chg;
+        ctx.strokeStyle = pass ? CANDY[arm % CANDY.length] : '#ffffff';
+        ctx.lineWidth = S * (pass ? 0.07 : 0.13) * (0.6 + 0.6 * chg);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // wrapped candies orbiting the mallow, one per pop (max 12); they fly off in the release burst
+  function drawOrbit(w, p, size, h) {
+    var n = Math.min(12, h.tn), chg = clamp01(num(w.charge, 0));
+    if (n <= 0 || chg < 0.05 || w.dead) return;
+    var S = L.S, sw = num(w.swirlA, 0) * 1.5, r = size * 0.95, k;
+    for (k = 0; k < n; k++) {
+      var a = sw + k * 6.2832 / n, x = p.x + Math.cos(a) * r, y = p.y + Math.sin(a) * r * (L.portrait ? 1 : 1);
+      var sz = S * 0.16 * (1 + 0.3 * h.tp);
+      ctx.fillStyle = CANDY[k % CANDY.length];
+      ctx.beginPath(); ctx.arc(x, y, sz, 0, 6.2832); ctx.fill();
+      // wrapper ends
+      var ca = Math.cos(a + 1.5708) * sz, sa = Math.sin(a + 1.5708) * sz;
+      ctx.beginPath();
+      ctx.moveTo(x + ca * 0.8, y + sa * 0.8); ctx.lineTo(x + ca * 1.7 - sa * 0.5, y + sa * 1.7 + ca * 0.5); ctx.lineTo(x + ca * 1.7 + sa * 0.5, y + sa * 1.7 - ca * 0.5);
+      ctx.moveTo(x - ca * 0.8, y - sa * 0.8); ctx.lineTo(x - ca * 1.7 - sa * 0.5, y - sa * 1.7 + ca * 0.5); ctx.lineTo(x - ca * 1.7 + sa * 0.5, y - sa * 1.7 - ca * 0.5);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.beginPath(); ctx.arc(x - sz * 0.3, y - sz * 0.3, sz * 0.3, 0, 6.2832); ctx.fill();
+    }
+  }
+
   function drawHoldFront(w, p, size, h) {
     var S = L.S, k, a;
+    drawOrbit(w, p, size, h);
     if (h.hk > 0.08) {
       // spin swooshes: two arcs chasing round the mallow
       ctx.lineCap = 'round';
@@ -528,7 +615,8 @@
     var hh = running ? Math.abs(Math.sin(w.phase * 1.4)) : 0;
     var hop = w.puffT > 0 ? 0 : hh * 0.16 * S;
     var strain = w.puffT > 1.0 && !w.dead && h.hk < 0.05 ? Math.sin(w.t * 60) * 0.06 : 0;
-    var size = S * 0.8 * w.pop * (1 + 0.15 * h.tp * (h.big ? 1.4 : 1) + 0.04 * h.hk);
+    var chg = clamp01(num(w.charge, 0));
+    var size = S * 0.8 * w.pop * (1 + 0.15 * h.tp * (h.big ? 1.4 : 1) + 0.3 * chg + 0.05 * chg * Math.sin(w.t * 40));
     var sx = 1 + Math.max(-0.3, Math.min(0.3, w.popV * 0.012)), sy = 2 - sx;
     if (!w.puffT && !w.dead) { sy *= 1 + (hh < 0.15 ? -0.1 : 0.04); sx *= 1 + (hh < 0.15 ? 0.06 : -0.02); }
     ctx.fillStyle = 'rgba(80,60,120,0.18)';
@@ -562,17 +650,36 @@
   }
 
   function drawParts(w, lx) {
-    var k, p, a;
-    for (k = 0; k < w.parts.length; k++) {
-      p = w.parts[k];
+    var k, p, a, n = w.nParts != null ? w.nParts : w.parts.length, list = w.parts;
+    // Batched: one path per (colour, alpha level) instead of one draw call per particle.
+    // Alpha is quantised to 4 levels; confetti quads are rotated by hand (no save/rotate/restore).
+    cols.length = 0;
+    for (k = 0; k < n; k++) {
+      p = list[k];
       a = Math.min(1, p.life / (p.max * 0.5));
-      ctx.globalAlpha = a; ctx.fillStyle = p.col;
-      if (p.kind === 0) {
-        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillRect(-p.size, -p.size * 0.6, p.size * 2, p.size * 1.2); ctx.restore();
-      } else if (p.kind === 1) {
-        ctx.beginPath(); ctx.arc(p.x, p.y, p.size * 0.8, 0, 6.2832); ctx.fill();
-      } else {
-        starPath(p.x, p.y, p.size * 1.4, p.size * 0.6, 5, p.rot); ctx.fill();
+      p._b = a > 0.75 ? 3 : a > 0.5 ? 2 : a > 0.25 ? 1 : 0;
+      if (cols.indexOf(p.col) < 0) cols.push(p.col);
+    }
+    for (var b = 0; b < 4; b++) {
+      ctx.globalAlpha = (b + 1) * 0.25;
+      for (var c = 0; c < cols.length; c++) {
+        var col = cols[c], any = false;
+        for (k = 0; k < n; k++) {
+          p = list[k];
+          if (p._b !== b || p.col !== col) continue;
+          if (!any) { ctx.beginPath(); any = true; }
+          if (p.kind === 0) {
+            var cr = Math.cos(p.rot), sr = Math.sin(p.rot), hw = p.size, hh = p.size * 0.6;
+            ctx.moveTo(p.x + cr * hw - sr * hh, p.y + sr * hw + cr * hh);
+            ctx.lineTo(p.x - cr * hw - sr * hh, p.y - sr * hw + cr * hh);
+            ctx.lineTo(p.x - cr * hw + sr * hh, p.y - sr * hw - cr * hh);
+            ctx.lineTo(p.x + cr * hw + sr * hh, p.y + sr * hw - cr * hh);
+            ctx.closePath();
+          } else if (p.kind === 1) {
+            ctx.moveTo(p.x + p.size * 0.8, p.y); ctx.arc(p.x, p.y, p.size * 0.8, 0, 6.2832);
+          } else addStar(p.x, p.y, p.size * 1.4, p.size * 0.6, 5, p.rot);
+        }
+        if (any) { ctx.fillStyle = col; ctx.fill(); }
       }
     }
     ctx.globalAlpha = 1;
@@ -764,7 +871,11 @@
       ctx.fillStyle = 'rgba(255,190,70,' + (0.16 + 0.05 * Math.sin(w.t * 8)) + ')'; ctx.fillRect(0, 0, W, H);
     }
     ctx.save();
-    if (w.shake > 0 && !w.demo) ctx.translate((Math.random() - 0.5) * 2 * w.shakeAmp * (w.shake / 0.12 > 1 ? 1 : w.shake / 0.12), (Math.random() - 0.5) * 2 * w.shakeAmp * Math.min(1, w.shake / 0.12));
+    if (w.shake > 0 && !w.demo) {
+      // smooth decaying wobble instead of random jumps every frame (random offsets read as stutter)
+      var sk = Math.min(1, w.shake / 0.12), sk2 = sk * sk * w.shakeAmp;
+      ctx.translate(Math.sin(w.t * 53) * sk2, Math.cos(w.t * 41) * sk2 * 0.8);
+    }
     // hold rumble: grows with holdK, kicks on each tick (smooth noise, not random jumps)
     if (h.hk > 0.05 && !w.demo && !w.dead && !st.paused && curTaffy(w)) {
       var am = S * (0.025 * h.hk + 0.07 * h.tp * h.hk);

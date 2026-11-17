@@ -14,6 +14,7 @@
     [[190, 232, 255], [255, 226, 242]], [[217, 204, 255], [255, 240, 214]], [[255, 217, 194], [255, 246, 201]],
     [[201, 240, 255], [231, 216, 255]], [[255, 209, 232], [217, 241, 255]], [[255, 241, 168], [255, 214, 232]]
   ];
+  var MAX_PARTS = 360;
   var CANDY = ['#ff86bd', '#ffc3de', '#ffffff', '#ffd84d', '#e0508f'];
   var G = MP.game = {};
   var st = G.state = { mode: 'menu', score: 0, gates: 0, combo: 0, mult: 1, alive: true, running: false, paused: false, daily: false };
@@ -117,7 +118,7 @@
       tickN: 0, tickT: 9, holdK: 0, scrape: 0, ghostX: 0, slid: 0,
       pos: 0, speed: 7, vel: 7, simT: 0, runT: 0, puffT: 0, own: false, held: false, cd: 0, pend: -1, lastTap: -9, puffEnd: -9, evs: [], invT: 0,
       pop: 1, popV: 0, phase: 0, hitT: 0, dOff: 0, deadT: 0, rot: 0, shake: 0, shakeAmp: 6, hitStop: 0,
-      parts: [], texts: [], rings: [], streak: 0, maxStreak: 0, maxMult: 1,
+      parts: [], nParts: 0, texts: [], rings: [], swirlA: 0, emitAcc: 0, charge: 0, streak: 0, maxStreak: 0, maxMult: 1,
       walls: 0, lollisC: 0, taffyC: 0, perfects: 0, lollis: 0, snaps: 0, rushes: 0,
       rush: 0, rushNext: C.RUSH_STREAK, snap: null, crackT: 0, banner: null, zone: 0,
       prevBest: prevBest, bestGates: bestGates, flagN: bestGates >= 10 ? bestGates + 1 : 0, far: false, nb: false,
@@ -414,6 +415,7 @@
     while (acc >= DT && n < 32) { step(); acc -= DT; n++; if (w.hitStop > 0) { break; } }
     if (acc > DT * 32) acc = 0;
     G.alpha = acc / DT;
+    if (!MP.headless) updateFx(Math.min(dt, 0.05));
     musicTick();
     if (w.dead && !w.uiShown && w.deadT > (w.tip ? 1.0 : 0.5)) {
       w.uiShown = true;
@@ -485,7 +487,8 @@
       w.dOff = Math.min(1.4, w.deadT * 5);
       w.rot = Math.sin(w.deadT * 14) * 0.35 * Math.max(0, 1 - w.deadT * 1.4);
     }
-    if (!MP.headless) updateFx();
+    for (var gi = 0; gi < w.gates.length; gi++) { var gq = w.gates[gi]; if (gq.state === 2 || gq.state === 3) gq.t += DT; }
+    if (!MP.headless) holdFx();
   }
 
   function advance() {
@@ -577,6 +580,44 @@
   }
 
   // small spray thrown back from the mallow
+  // Sugar Charge: while holding taffy the mallow swells, candy swirls round it faster and faster and sparks
+  // stream out in a spiral; the stored charge explodes when the taffy ends cleanly (nova).
+  function holdFx() {
+    var w = W, on = inTaffy(), hk = w.holdK || 0;
+    w.charge += ((on ? hk : 0) - w.charge) * Math.min(1, DT * (on ? 6 : 14));
+    w.swirlA += DT * (on ? 4 + 14 * hk : 2);
+    if (!on || w.dead) { w.emitAcc = 0; return; }
+    w.emitAcc += DT * (8 + 34 * hk);
+    if (w.emitAcc < 1) return;
+    var R = MP.render, S = R.layout.S, c = here(), r = S * 0.4 * (1 + 0.3 * w.charge);
+    while (w.emitAcc >= 1) {
+      w.emitAcc -= 1;
+      var a = w.swirlA * 1.3 + Math.random() * 6.2832, ca = Math.cos(a), sa = Math.sin(a), sp = S * (2.5 + 4 * hk);
+      // tangential + outward velocity = spiral
+      addPart(c.x + ca * r, c.y + sa * r, (ca * 0.8 - sa) * sp, (sa * 0.8 + ca) * sp, rnd(0.25, 0.45), rnd(0.06, 0.11) * S * (1 + hk * 0.6),
+        CANDY[(Math.random() * CANDY.length) | 0], Math.random() < 0.25 ? 2 : 1, 0);
+    }
+  }
+
+  function nova(n, power) {
+    if (MP.headless) return;
+    var w = W, R = MP.render, S = R.layout.S, c = here(), i, a, sp;
+    // the orbiting candies fly off first, from where they are drawn
+    var orb = Math.min(12, n), r0 = S * 0.8 * (1 + 0.3 * w.charge) * 0.95;
+    for (i = 0; i < orb; i++) {
+      a = w.swirlA * 1.5 + i * 6.2832 / orb; sp = S * (9 + 5 * power);
+      addPart(c.x + Math.cos(a) * r0, c.y + Math.sin(a) * r0, Math.cos(a) * sp, Math.sin(a) * sp, rnd(0.6, 0.9), S * 0.2, CANDY[i % CANDY.length], 2, 0.15);
+    }
+    var cnt = Math.min(70, 22 + n * 3);
+    for (i = 0; i < cnt; i++) {
+      a = Math.random() * 6.2832; sp = S * rnd(3, 8 + 6 * power);
+      addPart(c.x, c.y, Math.cos(a) * sp, Math.sin(a) * sp - S, rnd(0.5, 1.0), rnd(0.1, 0.2) * S, CANDY[(Math.random() * CANDY.length) | 0], i % 3 === 0 ? 1 : 0, 0.6);
+    }
+    w.rings.push({ x: c.x, y: c.y, r: 0.8, life: 0.4, max: 0.4, col: 'rgba(255,255,255,0.95)', grow: 9 + 4 * power });
+    w.rings.push({ x: c.x, y: c.y, r: 0.6, life: 0.5, max: 0.5, col: 'rgba(255,225,77,0.9)', grow: 6 + 3 * power });
+    if (!w.demo) { w.shake = 0.18; w.shakeAmp = 6 + 4 * power; }
+  }
+
   function sparks(count, col) {
     if (MP.headless) return;
     var R = MP.render, S = R.layout.S, p = here();
@@ -797,6 +838,8 @@
     var w = W;
     g.state = 2; g.t = 0;
     w.taffyC++;
+    var held = w.tickN, ch = w.holdK || 0;
+    if (held > 0) nova(held, g.scraped ? 0.3 : 0.6 + 0.4 * ch);
     leaveTaffy();
     aud('holdEnd', !g.scraped);
     // PUFF_MAX counts again from here: leave room to let go, but an idle hold must not last forever
@@ -982,8 +1025,11 @@
   function addPart(x, y, vx, vy, life, size, col, kind, grav) {
     var w = W;
     if (MP.headless) return;
-    if (w.parts.length > 420) w.parts.shift();
-    w.parts.push({ x: x, y: y, vx: vx, vy: vy, life: life, max: life, size: size, col: col, kind: kind, grav: grav, rot: Math.random() * 6.28, vr: rnd(-10, 10) });
+    var a = w.parts, q;
+    if (w.nParts >= MAX_PARTS) q = a[(Math.random() * MAX_PARTS) | 0];   // full: recycle a random live one
+    else { q = a[w.nParts]; if (!q) q = a[w.nParts] = {}; w.nParts++; }
+    q.x = x; q.y = y; q.vx = vx; q.vy = vy; q.life = life; q.max = life; q.size = size; q.col = col; q.kind = kind; q.grav = grav;
+    q.rot = Math.random() * 6.28; q.vr = rnd(-10, 10);
   }
   function addText(s, x, y, col, size, life) {
     if (MP.headless) return;
@@ -1005,32 +1051,27 @@
     for (var i = 0; i < 90; i++) {
       addPart(rnd(0, window.innerWidth), rnd(-window.innerHeight * 0.4, 0), rnd(-2, 2) * L.S, rnd(1, 5) * L.S, rnd(1.6, 2.6), rnd(0.12, 0.22) * L.S, cols[i % cols.length], 0, 0.5);
     }
-    w.parts.length > 420 && w.parts.splice(0, w.parts.length - 420);
   };
 
-  function updateFx() {
-    var w = W, i, p, S = MP.render.layout.S;
-    for (i = w.parts.length - 1; i >= 0; i--) {
-      p = w.parts[i];
-      p.life -= DT;
-      if (p.life <= 0) { w.parts.splice(i, 1); continue; }
-      p.vy += p.grav * 30 * S * DT;
-      p.x += p.vx * DT; p.y += p.vy * DT; p.rot += p.vr * DT;
-      if (p.grav > 0.5) p.vx *= 0.995;
+  function updateFx(dt) {
+    var w = W, i, p, S = MP.render.layout.S, a = w.parts, damp = Math.pow(0.995, dt * 120);
+    for (i = w.nParts - 1; i >= 0; i--) {
+      p = a[i];
+      p.life -= dt;
+      if (p.life <= 0) { w.nParts--; a[i] = a[w.nParts]; a[w.nParts] = p; continue; }
+      p.vy += p.grav * 30 * S * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt;
+      if (p.grav > 0.5) p.vx *= damp;
     }
     for (i = w.texts.length - 1; i >= 0; i--) {
       p = w.texts[i];
-      p.life -= DT; p.y -= S * (0.9 / p.max) * 1.2 * DT;
+      p.life -= dt; p.y -= S * (0.9 / p.max) * 1.2 * dt;
       if (p.life <= 0) w.texts.splice(i, 1);
     }
     for (i = w.rings.length - 1; i >= 0; i--) {
       p = w.rings[i];
-      p.life -= DT; p.r += p.grow * DT;
+      p.life -= dt; p.r += p.grow * dt;
       if (p.life <= 0) w.rings.splice(i, 1);
-    }
-    for (i = 0; i < w.gates.length; i++) {
-      p = w.gates[i];
-      if (p.state === 2 || p.state === 3) p.t += DT;
     }
   }
 })();
