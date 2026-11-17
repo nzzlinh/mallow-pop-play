@@ -409,10 +409,10 @@
     w.t += dt;
     if (st.paused) return;
     if (w.hitStop > 0) { w.hitStop -= dt; musicTick(); return; }
-    acc += Math.min(dt, 0.05);
+    acc += Math.min(dt, 0.25);
     var n = 0;
-    while (acc >= DT && n < 12) { step(); acc -= DT; n++; if (w.hitStop > 0) { break; } }
-    if (acc > DT * 12) acc = 0;
+    while (acc >= DT && n < 32) { step(); acc -= DT; n++; if (w.hitStop > 0) { break; } }
+    if (acc > DT * 32) acc = 0;
     G.alpha = acc / DT;
     musicTick();
     if (w.dead && !w.uiShown && w.deadT > (w.tip ? 1.0 : 0.5)) {
@@ -426,7 +426,9 @@
     var w = W, s = MP.audio;
     if (!w || w.dead || !(w.demo || (st.mode === 'run' && st.running))) return;
     if (s && typeof s.musicTick === 'function') {
-      try { s.musicTick(w.beatF, w.bpm * (w.rush > 0 ? C.RUSH_SPEED : 1)); } catch (e) { /* ignore */ }
+      var bpmNow = w.bpm * (w.rush > 0 ? C.RUSH_SPEED : 1);
+      // include the part of a fixed step not simulated yet, so the beat matches real time
+      try { s.musicTick(w.beatF + acc * bpmNow / 60, bpmNow); } catch (e) { /* ignore */ }
     }
   }
 
@@ -776,7 +778,7 @@
     gateNote(g, perfect ? 'perfect' : 'great');
     aud('smash', w.streak);
     if (perfect) aud('perfect', w.streak);
-    if (!w.demo) { w.shake = 0.12; w.shakeAmp = 6; w.hitStop = 0.04; }
+    if (!w.demo) { w.shake = 0.12; w.shakeAmp = 6; }
     burst(perfect ? 56 : 36, true);
   }
 

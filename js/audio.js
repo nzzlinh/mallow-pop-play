@@ -62,8 +62,8 @@
 
   // hit kinds: velocity and brightness
   var KINDS = { perfect: 0, snap: 1, great: 2, good: 3, hole: 4 };
-  var KVEL = [1, 1, 0.9, 0.82, 0.74];
-  var KBR = [1, 1, 0.75, 0.6, 0.42];
+  var KVEL = [1, 1, 0.95, 0.92, 0.9];
+  var KBR = [1, 1, 0.8, 0.7, 0.65];
 
   function midi(n) { return 440 * Math.pow(2, (n - 69) / 12); }
   function mod(a, n) { return ((a % n) + n) % n; }
@@ -469,10 +469,10 @@
   // presets (static objects: no allocation per note)
   var SOFT_LEAD = { w: 'square', w2: 'square', det: 9, mix2: 0.5, att: 0.018, sus: 0.85, dec: 0.12, rel: 0.12, lp: 2600, q: 0.6, vib: 0.006, oct: 0 };
   var SOFT_LEAD_R = { w: 'square', w2: 'square', det: 9, mix2: 0.5, att: 0.018, sus: 0.85, dec: 0.12, rel: 0.12, lp: 2600, q: 0.6, vib: 0.006, oct: 0.22 };
-  var SOFT_FILL = { w: 'square', w2: 'square', det: 9, mix2: 0.5, att: 0.02, sus: 0.8, dec: 0.12, rel: 0.1, lp: 1900, q: 0.6, vib: 0, oct: 0 };
+  var SOFT_FILL = { w: 'square', w2: 'square', det: 9, mix2: 0.5, att: 0.02, sus: 0.8, dec: 0.12, rel: 0.1, lp: 2400, q: 0.6, vib: 0, oct: 0 };
   var POP_LEAD = { w: 'sawtooth', w2: 'sawtooth', det: 16, mix2: 1, att: 0.01, sus: 0.8, dec: 0.15, rel: 0.1, lp: 4500, lpEnd: 1800, q: 1.1, vib: 0.004, oct: 0 };
   var POP_LEAD_R = { w: 'sawtooth', w2: 'sawtooth', det: 16, mix2: 1, att: 0.01, sus: 0.8, dec: 0.15, rel: 0.1, lp: 4500, lpEnd: 2200, q: 1.1, vib: 0.004, oct: 0.25 };
-  var POP_FILL = { w: 'sawtooth', w2: 'sawtooth', det: 16, mix2: 1, att: 0.012, sus: 0.75, dec: 0.15, rel: 0.08, lp: 3000, lpEnd: 1400, q: 0.8, vib: 0, oct: 0 };
+  var POP_FILL = { w: 'sawtooth', w2: 'sawtooth', det: 16, mix2: 1, att: 0.012, sus: 0.75, dec: 0.15, rel: 0.08, lp: 3800, lpEnd: 1800, q: 0.8, vib: 0, oct: 0 };
   var SOFT_BASS = { w: 'triangle', w2: 'sine', det: -1200, mix2: 0.45, att: 0.01, sus: 0.9, dec: 0.1, rel: 0.08, lp: 0, oct: 0 };
   var POP_BASS = { w: 'square', w2: 'sine', det: -1200, mix2: 1.4, att: 0.006, sus: 0.8, dec: 0.12, rel: 0.05, lp: 900, q: 0.9, oct: 0 };
   var SOFT_ARP = { w: 'triangle', mix2: 0, att: 0.005, sus: 0.6, dec: 0.08, rel: 0.08, lp: 3000, q: 0.5, oct: 0 };
@@ -487,8 +487,8 @@
     var ch = CH[role], f = midi(m), player = role === 'lead';
     if (style === 'box') {
       var fb = f * 2; // music box sits an octave up
-      var len = player ? Math.max(0.9, dur * 1.5) : Math.max(0.7, dur * 1.3);
-      var idx = (player ? 1.2 + 1.1 * br : 1.0) * kt(fb, 700);
+      var len = Math.max(0.9, dur * 1.5);
+      var idx = (1.2 + 1.1 * br) * kt(fb, 700);
       var shim = player ? (0.022 + 0.018 * br) * (rush ? 1.6 : 1) : 0;
       return bell(ch, fb, t, len, 0.16 * vel, 3.5, idx, shim, player ? 1 : 0);
     }
@@ -770,7 +770,7 @@
     fillK[j] = -1e9; fillS[j] = null;
     if (ln) {
       if (!owned(k)) {
-        var v = melody('fill', ln + tr, t, fillerDur(k, i, s, stepSec), 1, 0.35);
+        var v = melody('fill', ln + tr, t, fillerDur(k, i, s, stepSec), 0.9, 0.6);
         fillK[j] = k; fillS[j] = v; fillT[j] = t;
         if (noteHook) noteHook('fill', ln + tr, t, '', fillerDur(k, i, s, stepSec));
       }
@@ -810,9 +810,21 @@
       sq.bpm = bpm;
     }
     bpm = sq.bpm;
-    var last = sq.lastB;
+    var last = sq.lastB, jumped = false;
     sq.lastB = beatF;
-    if (last === null || beatF < last - 1e-6 || beatF - last > 2) resync(beatF, last !== null && beatF < last);
+    if (last === null || beatF < last - 1e-6 || beatF - last > 2) { resync(beatF, last !== null && beatF < last); jumped = true; }
+    // Smooth clock: run on audio time and only nudge toward the game's beat, so frame jitter, hit pauses
+    // and tempo changes never bend the music. Big differences (pause, revive, new run) snap straight to it.
+    if (ctx) {
+      var tn = now();
+      if (sq.ckT == null || jumped) sq.ckB = beatF;
+      else {
+        var pb = sq.ckB + (tn - sq.ckT) * sq.ckBpm / 60;
+        sq.ckB = Math.abs(beatF - pb) > 0.25 ? beatF : pb + (beatF - pb) * 0.04;
+      }
+      sq.ckT = tn; sq.ckBpm = bpm;
+      beatF = sq.ckB;
+    }
     if (sq.fresh) { sq.fresh = false; sq.origin = Math.floor(sq.next / 16) * 16; }
     var playing = musicOn && !!sq.song && ready();
     if (ctx) { sq.t0 = now(); sq.b0 = beatF; }
